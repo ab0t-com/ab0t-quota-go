@@ -1,0 +1,57 @@
+# gitleaks config — keeps real secrets out of the repo.
+# Layered on top of the built-in default ruleset (AWS, Stripe, GitHub
+# tokens, generic high-entropy strings, etc.); the allowlists below
+# carve out known-safe fixtures and doc paths.
+
+title = "ab0t-quota-go secret scan"
+
+# Extend the built-in rules — never disable them entirely.
+[extend]
+useDefault = true
+
+# ----- Repo-wide allowlists ----------------------------------------------
+
+[allowlist]
+description = "Test fixtures, example configs, and docs that describe env-var schemas"
+
+# Path patterns — exempt entirely. Use POSIX globs.
+paths = [
+    # Test files and conformance fixtures
+    '''.*_test\.go$''',
+    '''testdata/.*''',
+    # Example servers — config-driven, no real secrets
+    '''examples/.*''',
+    # Docs that REFERENCE env-var names (the names, not the values)
+    '''docs/.*\.md$''',
+    '''Skills/.*\.md$''',
+    '''.*REVIEW.*\.md$''',
+    '''review_.*\.md$''',
+    '''PRODUCT_SPEC\.md$''',
+    '''README\.md$''',
+    '''CONSUMING\.md$''',
+    '''MIGRATION_FROM_PYTHON\.md$''',
+    '''ARCHITECTURE\.md$''',
+    '''CHANGELOG\.md$''',
+    '''back_references\.md$''',
+    # Release artifacts (compiled binaries get high-entropy false positives)
+    '''release/.*''',
+    # Gitleaks's own report files
+    '''gitleaks-report\.(json|sarif)$''',
+]
+
+# Known-safe test-fixture strings. Short, low-entropy, obviously not real.
+regexes = [
+    '''(?i)quota_test_secret''',
+    '''"shh"''',
+    '''"tok123"''',
+]
+
+# Stop-words that, when present in a finding's match, mark it as safe.
+stopwords = [
+    "example",
+    "placeholder",
+    "your-secret-here",
+    "REPLACE_ME",
+    "<your_",
+    "<<<",
+]

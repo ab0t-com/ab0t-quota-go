@@ -1,0 +1,8 @@
+# Known-safe gitleaks findings, by fingerprint.
+#
+# To add an entry: run `gitleaks detect`, copy the Fingerprint line of
+# the false positive, and paste it on its own line below.
+#
+# Prefer fixing `.gitleaks.toml` (path/regex allowlist) over per-finding
+# fingerprints — fingerprints change when the surrounding code moves and
+# need re-pasting.

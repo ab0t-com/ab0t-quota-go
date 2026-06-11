@@ -1,0 +1,69 @@
+# ---------- Go binaries ------------------------------------------------
+# Cross-compile / native build artifacts.
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries built with `go test -c`
+*.test
+
+# Module binary dropped at root by `go build ./cmd/quotactl`.
+/quotactl
+# Local CLI binary when built into the source tree.
+/cmd/quotactl/quotactl
+
+# Cross-compiled release artifacts (scripts/build.sh).
+/release/
+
+# ---------- Go profile + coverage --------------------------------------
+*.out
+*.prof
+*.pprof
+*.coverprofile
+cover.out
+cover.html
+coverage.out
+coverage.html
+c.out
+
+# ---------- Go workspace -----------------------------------------------
+# Use a `go.work` for multi-module local dev; don't commit it.
+go.work
+go.work.sum
+
+# ---------- Dependency directories --------------------------------------
+# We rely on the module proxy; we don't vendor.
+/vendor/
+
+# ---------- Env / secrets ----------------------------------------------
+# Never commit. Operator owns these; even local dev .env is out of scope.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---------- Logs + tmp -------------------------------------------------
+*.log
+/tmp/
+/.tmp/
+
+# ---------- gitleaks artifacts -----------------------------------------
+gitleaks-report.json
+gitleaks-report.sarif
+
+# ---------- Editor + OS metadata ---------------------------------------
+.idea/
+.vscode/
+.history/
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+*.bak
+.DS_Store
+Thumbs.db
+desktop.ini

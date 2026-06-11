@@ -1,0 +1,35 @@
+{
+  "$schema": "https://ab0t.com/quota-config.schema.json",
+  "service_name": "basic-example",
+  "engine_mode": "local",
+  "tier_provider": {
+    "type": "static",
+    "default_tier": "free",
+    "mapping": {}
+  },
+  "storage": {
+    "redis_key_prefix": "ab0t-quota"
+  },
+  "enforcement": {
+    "enabled": true
+  },
+  "tiers": [
+    {
+      "tier_id": "free",
+      "display_name": "Free",
+      "sort_order": 1,
+      "limits": {
+        "api.requests": 100
+      }
+    }
+  ],
+  "resources": [
+    {
+      "service": "basic-example",
+      "resource_key": "api.requests",
+      "display_name": "API Requests",
+      "counter_type": "accumulator",
+      "reset_period": "hourly"
+    }
+  ]
+}

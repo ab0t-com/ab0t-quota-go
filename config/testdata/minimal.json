@@ -1,0 +1,15 @@
+{
+  "$comment": "minimal config for tests",
+  "service_name": "test-service",
+  "tier_provider": {"type": "jwt", "default_tier": "free"},
+  "storage": {"redis_url": "redis://localhost:6379/0"},
+  "enforcement": {"enabled": true},
+  "resources": [
+    {"service": "test", "resource_key": "test.concurrent", "display_name": "Test", "counter_type": "gauge"}
+  ],
+  "resource_bundles": {"test": ["test.concurrent"]},
+  "tiers": [
+    {"tier_id": "free", "display_name": "Free", "sort_order": 0, "limits": {"test.concurrent": 1}},
+    {"tier_id": "pro", "display_name": "Pro", "sort_order": 1, "limits": {"test.concurrent": 25}}
+  ]
+}

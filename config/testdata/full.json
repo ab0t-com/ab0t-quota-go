@@ -1,0 +1,48 @@
+{
+  "$comment": "exercises env interpolation, all sub-structs, credit_grant, TierLimit shapes",
+  "service_name": "${QUOTA_SERVICE_NAME:-default-svc}",
+  "tier_provider": {"type": "mesh", "default_tier": "free", "cache_ttl_seconds": 300},
+  "storage": {
+    "redis_url": "${QUOTA_REDIS_URL:-redis://localhost:6379/0}",
+    "dynamodb_table": "${QUOTA_STATE_TABLE:-ab0t_quota_state}",
+    "persistence_enabled": true
+  },
+  "enforcement": {"enabled": true, "shadow_mode": false},
+  "alerts": {"enabled": true, "cooldown_seconds": 3600, "webhook_url": "https://alerts.example.com/h"},
+  "resources": [
+    {"service": "x", "resource_key": "x.concurrent", "display_name": "X", "counter_type": "gauge"},
+    {"service": "x", "resource_key": "x.rate", "display_name": "X rate", "counter_type": "rate", "window_seconds": 3600},
+    {"service": "x", "resource_key": "x.spend", "display_name": "X spend", "counter_type": "accumulator", "reset_period": "monthly", "precision": 2}
+  ],
+  "resource_bundles": {"x": ["x.concurrent"]},
+  "tiers": [
+    {
+      "tier_id": "free", "display_name": "Free", "sort_order": 0,
+      "features": ["basic"],
+      "limits": {
+        "x.concurrent": 1,
+        "x.rate": null,
+        "x.spend": {"limit": 10.00, "warning_threshold": 0.8, "critical_threshold": 0.95}
+      },
+      "initial_credit": "10.00",
+      "default_per_user_fraction": 0.5
+    },
+    {
+      "tier_id": "pro", "display_name": "Pro", "sort_order": 1,
+      "features": ["basic", "priority"],
+      "limits": {"x.concurrent": 25, "x.spend": 1000.00},
+      "credit_grant": {
+        "trigger": "subscription_invoice_paid",
+        "amount_per_period": "10.00",
+        "lifecycle": "use_it_or_lose_it",
+        "destination": "subscription_credit",
+        "reset_on_downgrade": true,
+        "reset_on_upgrade": false,
+        "dedup": "per_org_per_tier"
+      },
+      "billing_model": "subscription_with_credits",
+      "price": {"amount_per_period": "29.00", "currency": "USD", "period": "month"}
+    }
+  ],
+  "unknown_forward_compat_key": {"foo": "bar"}
+}
