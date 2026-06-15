@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/ab0t-com/ab0t-quota-go/internal/httpx"
 	"github.com/ab0t-com/ab0t-quota-go/mesh"
@@ -70,4 +71,18 @@ func (c *Client) CancelSubscription(ctx context.Context, orgID, subID string) er
 // Heartbeat calls POST /billing/heartbeat.
 func (c *Client) Heartbeat(ctx context.Context, in HeartbeatRequest) error {
 	return c.http.POST(ctx, "/billing/heartbeat", in, nil)
+}
+
+// RecordUsage records a metering/analytics usage row via
+// POST /billing/usage/{org_id}/. This is the METERING path, NOT the money
+// path (charge = reserve->commit proration at stop/delete). To avoid cost
+// fabrication / double-charging, the row MUST carry Cost="0", PlatformFee="0"
+// and ReservationID (see ticket 20260615_inter_service_contract_drift,
+// WORKFLOW_FINDINGS section 2). Best-effort: errors are logged and swallowed.
+func (c *Client) RecordUsage(ctx context.Context, in RecordUsageRequest) error {
+	if err := c.http.POST(ctx, "/billing/usage/"+in.OrgID+"/", in, nil); err != nil {
+		slog.Warn("billing record usage failed", "err", err, "org", in.OrgID)
+		return nil
+	}
+	return nil
 }

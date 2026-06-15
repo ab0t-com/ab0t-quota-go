@@ -63,6 +63,28 @@ type HeartbeatRequest struct {
 	Capability  string `json:"capability,omitempty"`
 }
 
+// RecordUsageRequest is POST /billing/usage/{org_id}/ body. Mirrors the
+// Python lib RecordUsageRequest / billing's canonical model. ResourceType is
+// OPEN (public mesh); Metadata is the only propagating open channel (billing
+// ignores unknown top-level fields). Cost/PlatformFee are decimal-as-string
+// ("0" for metering rows).
+type RecordUsageRequest struct {
+	OrgID         string         `json:"org_id"`
+	UserID        string         `json:"user_id"`
+	ToolID        string         `json:"tool_id"`
+	SessionID     string         `json:"session_id"`
+	RequestID     string         `json:"request_id,omitempty"`
+	InputTokens   int            `json:"input_tokens,omitempty"`
+	OutputTokens  int            `json:"output_tokens,omitempty"`
+	ComputeTime   float64        `json:"compute_time,omitempty"`
+	ResourceType  string         `json:"resource_type,omitempty"`
+	ReservationID string         `json:"reservation_id,omitempty"`
+	Cost          string         `json:"cost,omitempty"`
+	PlatformFee   string         `json:"platform_fee,omitempty"`
+	Timestamp     string         `json:"timestamp,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
 // Subscription is the shape returned from GET/DELETE /subscriptions paths.
 type Subscription struct {
 	SubscriptionID string `json:"subscription_id"`
