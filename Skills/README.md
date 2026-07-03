@@ -1,12 +1,13 @@
 # ab0t-quota-go — Agent Skills
 
-Nine SKILL.md packages for AI coding agents (Claude Code, Gemini CLI,
+Ten SKILL.md packages for AI coding agents (Claude Code, Gemini CLI,
 Codex CLI, Cursor, opencode, pi, OpenClaw) helping a Go developer
 integrate `github.com/ab0t-com/ab0t-quota-go`. One is the **hub** that
 routes everything else; six cover **mechanics** (how to call the API
-+ how to test it), one covers **judgment** (how to decide what to
-meter and how to price it), and one covers **concepts** (teaching
-billing fundamentals from zero).
++ how to test it), one is the **decision spine** (the ordered thinking
+process + mental model for standing the whole thing up), one covers
+**judgment** (how to decide what to meter and how to price it), and one
+covers **concepts** (teaching billing fundamentals from zero).
 
 ## Hub — the master entrypoint
 
@@ -28,6 +29,17 @@ to invoke, the hub knows.
 | [`ab0t-quota-go-cli`](ab0t-quota-go-cli/SKILL.md) | `quotactl` admin CLI — subscribe, events, replay, backfill, delete-user, capabilities |
 | [`ab0t-quota-go-config`](ab0t-quota-go-config/SKILL.md) | `quota-config.json` schema — tiers, resources, dedup, billing_model, alerts |
 | [`ab0t-quota-go-testing`](ab0t-quota-go-testing/SKILL.md) | unit tests, smoke tests, bash one-liners, failure-mode injection, troubleshooting by symptom, acceptance checklist before flipping prod |
+
+## Decision spine — the thinking process, start to live
+
+| Skill | Triggers on |
+|-------|-------------|
+| [`ab0t-quota-go-design`](ab0t-quota-go-design/SKILL.md) | "I want to charge for my service — where do I start?", how quota vs billing vs payment relate, "what do I decide vs what does ab0t do for me", the ordered decision sequence (meter → tiers → reset → enforce → free/paid → credits/subscription → mint accounts → config → wire → shadow → live), a worked example intent→live |
+
+The conductor skill. It re-teaches no mechanics — it sequences the
+decisions and routes each one to the skill/doc that owns it (design,
+concepts, consumer-setup, the go-* mechanics). Land here first when a
+team is confused about the whole billing+payment+quota picture.
 
 ## Judgment — how to design the pricing layer
 
