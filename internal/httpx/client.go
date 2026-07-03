@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -99,7 +100,15 @@ func (c *Client) DELETE(ctx context.Context, path string, out any) error {
 
 func (c *Client) do(req *http.Request, out any) error {
 	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+		// Mesh service-to-service auth: ab0t_sk_ API keys are sent via X-API-Key
+		// (billing/payment/etc.'s ab0t_auth reads keys from X-API-Key and validates
+		// the Authorization header as a JWT only — an API key sent as Bearer 401s).
+		// JWT-style tokens keep using Authorization: Bearer.
+		if strings.HasPrefix(c.Token, "ab0t_sk_") {
+			req.Header.Set("X-API-Key", c.Token)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+c.Token)
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
