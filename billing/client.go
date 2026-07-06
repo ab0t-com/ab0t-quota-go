@@ -21,7 +21,7 @@ func New(u mesh.URLs) (*Client, error) {
 	if u.Billing == "" {
 		return nil, errors.New("billing: AB0T_QUOTA_BILLING_URL not set")
 	}
-	return &Client{http: httpx.New(u.Billing, u.Token)}, nil
+	return &Client{http: httpx.New(u.Billing, u.BillingToken)}, nil
 }
 
 // CheckQuota calls POST /billing/quota/check. Used by the bridge engine

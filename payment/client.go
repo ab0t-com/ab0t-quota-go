@@ -18,7 +18,7 @@ func New(u mesh.URLs) (*Client, error) {
 	if u.Payment == "" {
 		return nil, errors.New("payment: AB0T_QUOTA_PAYMENT_URL not set")
 	}
-	return &Client{http: httpx.New(u.Payment, u.Token)}, nil
+	return &Client{http: httpx.New(u.Payment, u.PaymentToken)}, nil
 }
 
 // CreateCheckoutSession calls POST /checkout/sessions.
