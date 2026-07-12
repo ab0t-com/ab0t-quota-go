@@ -51,6 +51,9 @@ go.work.sum
 # tracked RELEASE.md; anything internal lives here and stays local.
 .private/
 
+# ---------- Archived scratch / diagnostics (local only) ----------------
+.archive/
+
 # ---------- Logs + tmp -------------------------------------------------
 *.log
 /tmp/

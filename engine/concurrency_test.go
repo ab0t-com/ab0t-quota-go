@@ -94,8 +94,34 @@ func TestEngine_AccumulatorNoDoubleSpend(t *testing.T) {
 	}
 }
 
-// TestEngine_ConcurrentReleaseDoesntUnderflow runs paired Spend+Release
-// on a gauge; net counter must return to 0.
+// TestEngine_ConcurrentReleaseDoesntUnderflow runs paired Spend+Release on a
+// gauge; each pair's lifecycle nets to 0, so the fully-drained gauge is 0.
+//
+// REFRAMED 2026-07-12 (W-D20) — cite DECISIONS.md D-20.
+//
+// The original assertion fired N *unpaired* concurrent Spend(+1) and N unpaired
+// Release(-1) and demanded an EXACT net of 0. That net is only reachable if the
+// gauge is allowed to go transiently NEGATIVE — a Release that wins the race
+// before its paired Spend would have to record a -1. But a gauge is the *level*
+// of currently-active resources and floors at 0 by design (QG-06 / D-24): a
+// release at level 0 is an over-release and is clamped, so that decrement is
+// lost and a later Spend leaves positive residue. The old assertion therefore
+// demanded the very phantom-headroom bug the floor exists to kill; it is a
+// non-guarantee (it fails against Python too, which also floors). Determined
+// empirically: the engine is atomic and race-clean (Spend→IncrByFloat,
+// Release→DecrByFloorZero, both mutex-guarded RMW under -race); the residue is
+// the floor, not a lost update.
+//
+// The LEGITIMATE intent behind the name — "a paired spend/release lifecycle
+// nets to zero, and a duplicate/racing release never underflows" — is what this
+// reframed test now asserts, and it does so more strongly than the D-20
+// fallback of `Used >= 0`: each goroutine pairs its own Spend→Release with a
+// happens-before, and the pairs run concurrently. This is deterministic
+// (net == 0 exactly) AND still has teeth against a real engine race — a
+// non-atomic read-modify-write in Spend/Release would drop increments or
+// decrements and break the exact-0. The unordered floor invariant (Used >= 0,
+// never exceeds N) is owned by TestGaugeConcurrent_NeverUnderflows_Correct_QG06
+// (gauge_floor_concurrent_test.go) and TestGaugeRelease_FloorsAtZero_...QG06.
 func TestEngine_ConcurrentReleaseDoesntUnderflow(t *testing.T) {
 	cfg := &config.Config{
 		Enforcement:  config.EnforcementConfig{Enabled: true},
@@ -116,21 +142,22 @@ func TestEngine_ConcurrentReleaseDoesntUnderflow(t *testing.T) {
 	const N = 50
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	wg.Add(N * 2)
+	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
+			// Happens-before within the pair: the Spend completes before its
+			// paired Release runs, so no Release ever races ahead of level 0.
 			_, _ = e.Spend(ctx, CheckInput{UserID: "alice", OrgID: "o", ResourceKey: "x", Cost: 1})
-		}()
-		go func() {
-			defer wg.Done()
 			_ = e.Release(ctx, CheckInput{UserID: "alice", OrgID: "o", ResourceKey: "x", Cost: 1})
 		}()
 	}
 	wg.Wait()
 
 	res, _ := e.Check(ctx, CheckInput{UserID: "alice", OrgID: "o", ResourceKey: "x"})
+	// Every paired lifecycle nets to 0 → the drained gauge is exactly 0, and
+	// never negative (the anti-underflow guarantee the test name promises).
 	if res.Used != 0 {
-		t.Errorf("paired spend/release should net to 0, got %v", res.Used)
+		t.Errorf("paired (happens-before) spend/release should net to 0, got %v", res.Used)
 	}
 }
