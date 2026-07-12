@@ -60,20 +60,25 @@ fi
 echo "==> cross-compile"
 VERSION="$VERSION" scripts/build.sh "$VERSION"
 
-# 5. Release notes scaffold (only if absent).
+# 5. Release notes scaffold (only if absent). Every editable line is a
+#    (FILL IN ...) placeholder — including the parity version, so it can never
+#    silently go stale the way a hardcoded value does.
 NOTES_FILE="release/${VERSION}/RELEASE_NOTES.md"
 if [ ! -f "$NOTES_FILE" ]; then
   cat > "$NOTES_FILE" <<EOF
 # ab0t-quota-go ${VERSION}
 
 ## Highlights
-- (fill in)
+- (FILL IN: the headline a consumer needs — what's new and why they care)
+
+## Breaking changes
+- (FILL IN: exactly what a consumer must DO to keep working — or write "none")
 
 ## Bug fixes
-- (fill in)
+- (FILL IN — or write "none")
 
-## Wire-level parity notes
-- Matches Python ab0t-quota v0.5.2
+## Wire-level parity
+- (FILL IN: matches Python ab0t-quota vX.Y.Z — put the real version)
 
 ## Install
 
@@ -95,6 +100,26 @@ EOF
 else
   echo "==> release notes already exist at ${NOTES_FILE}"
 fi
+
+# 5b. FAIL-PROOF GATE — refuse to complete while the notes are unfilled.
+#     A lazy 'make release' now cannot go green with placeholder notes, so a
+#     placeholder can never reach a GitHub release. First run writes the
+#     scaffold and stops here; fill it in, re-run, and it passes.
+if grep -nEi '\(fill in|vX\.Y\.Z|\bTODO\b|\bTBD\b' "$NOTES_FILE" >/dev/null 2>&1; then
+  echo
+  echo "  ============================================================"
+  echo "  x RELEASE BLOCKED — release notes are not filled in."
+  echo "  ============================================================"
+  echo "  $NOTES_FILE still has placeholders:"
+  grep -nEi '\(fill in|vX\.Y\.Z|\bTODO\b|\bTBD\b' "$NOTES_FILE" | sed 's/^/      /'
+  echo
+  echo "  Replace every placeholder with real content (or \"none\"), including the"
+  echo "  parity version, then re-run:  make release VERSION=${VERSION}"
+  echo "  The release cannot proceed with placeholder notes."
+  echo
+  exit 1
+fi
+echo "==> release notes look complete (no placeholders)"
 
 echo
 echo "============================================================"
