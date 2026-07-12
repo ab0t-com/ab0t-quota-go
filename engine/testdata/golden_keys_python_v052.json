@@ -1,0 +1,45 @@
+{
+  "_what": "Golden Redis key shapes produced by the deployed Python lib (ab0t-quota v0.5.x) for a fixed config. The Go engine MUST write to these exact keys or a mixed Python/Go fleet double-books silently.",
+  "_ticket": "sandbox-platform/tickets/20260709_ab0t_quota_systemic_integrity_redesign — TASK P0.5 (QG-03, E-D4)",
+  "_derivation": "Executed against the Python lib source at shared/ab0t-quota (READ-ONLY). Regenerate with dump_golden_keys_python.py in this directory. Source citations: base.py:20-21 (prefix quota:{org}:{rk}), gauge.py:19-23 (:gauge, :gauge:user:{uid}), accumulator.py:52-54 + 26-37 (:acc:{period}), rate.py:22-24 (:rate).",
+  "_constraint": "D-10 / FUTURE_20260709 §2: Go adopts the EXISTING Python keyspace. Never change the Python keys; any keyspace change is a stop-the-world migration gated by storage.keyspace_version.",
+  "org_id": "org-123",
+  "user_id": "user-1",
+  "at_utc": "2026-03-15T10:00:00Z",
+  "keys": {
+    "gauge_org": {
+      "resource_key": "sandboxes",
+      "counter_type": "gauge",
+      "key": "quota:org-123:sandboxes:gauge"
+    },
+    "gauge_user_partition": {
+      "resource_key": "sandboxes",
+      "counter_type": "gauge",
+      "key": "quota:org-123:sandboxes:gauge:user:user-1",
+      "_note": "Per-user partition — does not exist at all in Go (QG-04 / P5.4)."
+    },
+    "accumulator_monthly": {
+      "resource_key": "api_spend_usd",
+      "counter_type": "accumulator",
+      "reset_period": "monthly",
+      "key": "quota:org-123:api_spend_usd:acc:2026-03"
+    },
+    "rate": {
+      "resource_key": "api_calls",
+      "counter_type": "rate",
+      "window_seconds": 3600,
+      "key": "quota:org-123:api_calls:rate"
+    }
+  },
+  "activation_keys": {
+    "_what": "TASK P5.2 activation-related keys. Byte-parity is required for a mixed Python/Go fleet (D-22). Derived by executing the Python lib (dump_golden_keys_python.py). Sources: gauge.py _seq_user_key/_idem_key; activations.py RedisActivationStore _row_key/_open_index_key; mint_activation_id prefix.",
+    "resource_key": "sandboxes",
+    "activation_id_sample": "act_abc123",
+    "gauge_seq_user": "quota:org-123:sandboxes:gauge:seq:user:user-1",
+    "acquire_idem": "quota:org-123:sandboxes:idem:mykey",
+    "acquire_idem_unused": "quota:org-123:sandboxes:idem:__unused__",
+    "activation_row": "activation:row:act_abc123",
+    "activation_open_index": "activation:open:org:org-123",
+    "mint_prefix": "act_"
+  }
+}

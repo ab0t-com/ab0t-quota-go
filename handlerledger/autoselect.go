@@ -18,16 +18,31 @@ type AutoSelectOptions struct {
 }
 
 // AutoSelectStore returns the best available LedgerStore. Priority:
-// DDB > Redis > Memory. Memory backend logs a loud warning so it's not
-// silently used in prod.
+// DDB > Redis > Memory. The log line always names the backend actually
+// returned (finding QG-02): if a requested durable backend is unavailable,
+// the fallback to memory is a loud DEGRADED warning, never a silent swap.
 func AutoSelectStore(opts AutoSelectOptions) LedgerStore {
 	if opts.DDBClient != nil {
-		slog.Info("handler ledger backend: DDB", "table", ddbTableOrDefault(opts.DDBTable))
-		return newDDBLedgerStore(opts.DDBClient, ddbTableOrDefault(opts.DDBTable))
+		s, err := newDDBLedgerStore(opts.DDBClient, ddbTableOrDefault(opts.DDBTable))
+		if err == nil {
+			slog.Info("handler ledger backend: DDB", "table", ddbTableOrDefault(opts.DDBTable))
+			return s
+		}
+		slog.Warn("handler ledger: DDB requested but unavailable — DEGRADED to InMemoryLedgerStore (memory). "+
+			"Idempotency/ledger rows are process-local and lost on restart; duplicate event side-effects are NOT durably prevented.",
+			"err", err)
+		return NewInMemoryLedgerStore()
 	}
 	if opts.Redis != nil {
-		slog.Info("handler ledger backend: Redis (72h TTL)")
-		return newRedisLedgerStore(opts.Redis)
+		s, err := newRedisLedgerStore(opts.Redis)
+		if err == nil {
+			slog.Info("handler ledger backend: Redis (72h TTL)")
+			return s
+		}
+		slog.Warn("handler ledger: Redis requested but unavailable — DEGRADED to InMemoryLedgerStore (memory). "+
+			"Idempotency/ledger rows are process-local and lost on restart; duplicate event side-effects are NOT durably prevented.",
+			"err", err)
+		return NewInMemoryLedgerStore()
 	}
 	slog.Warn("handler ledger: NO PERSISTENT STORE — using InMemoryLedgerStore. " +
 		"Ledger rows will be lost on restart. Provide Redis or DDB to fix.")

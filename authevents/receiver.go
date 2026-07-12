@@ -28,10 +28,11 @@ type ReceiverConfig struct {
 // Wire it at "<your prefix>/api/quotas/_webhooks/auth".
 //
 // Wire contract (PRODUCT_SPEC §11.3):
-//   401 + {"detail":"invalid signature"} — bad/missing HMAC (static string)
-//   400 + {"detail":"invalid json"}      — body isn't JSON
-//   200 + {"status":"ignored","event_type":...} — no handlers
-//   200 + {"status":"ok","ran":N,"event_type":...} — handlers ran
+//
+//	401 + {"detail":"invalid signature"} — bad/missing HMAC (static string)
+//	400 + {"detail":"invalid json"}      — body isn't JSON
+//	200 + {"status":"ignored","event_type":...} — no handlers
+//	200 + {"status":"ok","ran":N,"event_type":...} — handlers ran
 //
 // Handler errors are caught + logged; auth always sees 200 (else retry
 // compounds). For an idempotent handler whose retries are exhausted,

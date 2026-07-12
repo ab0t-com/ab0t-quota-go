@@ -23,8 +23,10 @@ type Config struct {
 	Alerts             AlertsConfig             `json:"alerts,omitempty"`
 	Enforcement        EnforcementConfig        `json:"enforcement"`
 	BillingIntegration BillingIntegrationConfig `json:"billing_integration,omitempty"`
+	Billing            BillingConfig            `json:"billing,omitempty"`
+	Outbox             OutboxConfig             `json:"outbox,omitempty"`
 	Reconciliation     ReconciliationConfig     `json:"reconciliation,omitempty"`
-	Pricing            json.RawMessage          `json:"pricing,omitempty"`     // out of scope for v0.1.0; raw for forward-compat
+	Pricing            json.RawMessage          `json:"pricing,omitempty"`      // out of scope for v0.1.0; raw for forward-compat
 	BridgeCache        json.RawMessage          `json:"bridge_cache,omitempty"` // out of scope; raw
 
 	// Extra captures unknown top-level keys. Never used at runtime; exists

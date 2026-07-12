@@ -21,10 +21,10 @@ import (
 type Event struct {
 	EventType  string         `json:"event_type"`
 	EventID    string         `json:"event_id"`
-	Type       string         `json:"type,omitempty"`       // v2 alias
-	ID         string         `json:"id,omitempty"`         // v2 alias
+	Type       string         `json:"type,omitempty"` // v2 alias
+	ID         string         `json:"id,omitempty"`   // v2 alias
 	OccurredAt time.Time      `json:"occurred_at"`
-	Timestamp  time.Time      `json:"timestamp,omitempty"`  // v2 alias
+	Timestamp  time.Time      `json:"timestamp,omitempty"` // v2 alias
 	Data       map[string]any `json:"data,omitempty"`
 
 	// Top-level envelope fields (also present in v1).

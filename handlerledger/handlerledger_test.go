@@ -15,11 +15,11 @@ type stubEvent struct {
 	raw                json.RawMessage
 }
 
-func (e stubEvent) GetEventID() string     { return e.id }
-func (e stubEvent) GetEventType() string   { return e.typ }
-func (e stubEvent) GetUserID() string      { return e.user }
-func (e stubEvent) GetOrgID() string       { return e.org }
-func (e stubEvent) Raw() json.RawMessage   { return e.raw }
+func (e stubEvent) GetEventID() string   { return e.id }
+func (e stubEvent) GetEventType() string { return e.typ }
+func (e stubEvent) GetUserID() string    { return e.user }
+func (e stubEvent) GetOrgID() string     { return e.org }
+func (e stubEvent) Raw() json.RawMessage { return e.raw }
 
 func newEvent(id, typ, user, org string) Event {
 	return stubEvent{

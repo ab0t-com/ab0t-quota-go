@@ -81,7 +81,7 @@ func TestEngine_DenyOverLimit(t *testing.T) {
 
 func TestEngine_ShadowModeFlipsDenyToShadowAllow(t *testing.T) {
 	cfg := &config.Config{
-		Enforcement: config.EnforcementConfig{Enabled: true, ShadowMode: true},
+		Enforcement:  config.EnforcementConfig{Enabled: true, ShadowMode: true},
 		TierProvider: config.TierProviderConfig{Type: "static", Mapping: map[string]string{"alice": "pro"}},
 		Tiers: []config.Tier{
 			{TierID: "pro", Limits: map[string]config.TierLimit{
@@ -103,7 +103,7 @@ func TestEngine_ShadowModeFlipsDenyToShadowAllow(t *testing.T) {
 
 func TestEngine_KillSwitchDenies(t *testing.T) {
 	cfg := &config.Config{
-		Enforcement: config.EnforcementConfig{Enabled: true, GlobalKillSwitch: true},
+		Enforcement:  config.EnforcementConfig{Enabled: true, GlobalKillSwitch: true},
 		TierProvider: config.TierProviderConfig{Type: "static", DefaultTier: "free"},
 		Tiers:        []config.Tier{{TierID: "free"}},
 		Resources:    []config.ResourceDef{{ResourceKey: "x", CounterType: config.CounterGauge}},
@@ -117,7 +117,7 @@ func TestEngine_KillSwitchDenies(t *testing.T) {
 
 func TestEngine_EnforcementDisabledAllowsAll(t *testing.T) {
 	cfg := &config.Config{
-		Enforcement: config.EnforcementConfig{Enabled: false},
+		Enforcement:  config.EnforcementConfig{Enabled: false},
 		TierProvider: config.TierProviderConfig{Type: "static", DefaultTier: "free"},
 		Tiers:        []config.Tier{{TierID: "free"}},
 		Resources:    []config.ResourceDef{{ResourceKey: "x", CounterType: config.CounterGauge}},

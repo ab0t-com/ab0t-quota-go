@@ -17,13 +17,13 @@ import (
 // Templates is the consumer-overridable copy. Zero-valued fields use the
 // in-package defaults.
 type Templates struct {
-	Denied         string
-	OverBurst      string
-	Warning        string
-	Critical       string
-	UpgradePrompt  string
-	UnknownTier    string
-	ShadowAllowed  string
+	Denied        string
+	OverBurst     string
+	Warning       string
+	Critical      string
+	UpgradePrompt string
+	UnknownTier   string
+	ShadowAllowed string
 }
 
 // Builder composes denial messages by rendering Templates.

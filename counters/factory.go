@@ -3,6 +3,8 @@ package counters
 import (
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/ab0t-com/ab0t-quota-go/config"
 )
 
@@ -22,6 +24,22 @@ func NewMemoryFactory(prefix KeyPrefix) *Factory {
 		Rates:  NewMemoryRateStore(),
 		Prefix: prefix,
 	}
+}
+
+// NewRedisFactory returns a Factory backed by durable go-redis stores
+// (TASK P5.1). client is a *redis.Client (or any redis.Cmdable). Returns
+// ErrRedisNotAvailable when client is nil so the caller degrades loudly to
+// NewMemoryFactory rather than silently.
+func NewRedisFactory(client redis.Cmdable, prefix KeyPrefix) (*Factory, error) {
+	floats, err := NewRedisStore(client)
+	if err != nil {
+		return nil, err
+	}
+	rates, err := NewRedisRateStore(client)
+	if err != nil {
+		return nil, err
+	}
+	return &Factory{Floats: floats, Rates: rates, Prefix: prefix}, nil
 }
 
 // Counter returns a Counter for resource. Use only when you want a plain

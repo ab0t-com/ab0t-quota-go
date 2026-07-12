@@ -45,6 +45,12 @@ go.work.sum
 *.pem
 *.key
 
+# ---------- Internal-only notes (NEVER pushed to the public repo) -------
+# Home for RELEASE_INTERNAL.md and any coordination notes that reference
+# internal services, tickets, or deploy ordering. Public release SOP is the
+# tracked RELEASE.md; anything internal lives here and stays local.
+.private/
+
 # ---------- Logs + tmp -------------------------------------------------
 *.log
 /tmp/

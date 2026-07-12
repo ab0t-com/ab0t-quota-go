@@ -49,6 +49,20 @@ func (s *InMemoryStore) IncrByFloat(_ context.Context, key string, delta float64
 	return s.floats[key], nil
 }
 
+// DecrByFloorZero subtracts amount and floors at zero, atomically under the
+// store mutex (finding QG-06).
+func (s *InMemoryStore) DecrByFloorZero(_ context.Context, key string, amount float64) (float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweep()
+	v := s.floats[key] - amount
+	if v < 0 {
+		v = 0
+	}
+	s.floats[key] = v
+	return v, nil
+}
+
 func (s *InMemoryStore) GetFloat(_ context.Context, key string) (float64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

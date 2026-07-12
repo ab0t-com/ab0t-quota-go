@@ -21,13 +21,13 @@ type ResourceRouter func(r *http.Request) (resourceKey string, cost float64)
 
 // GuardConfig wires the middleware.
 type GuardConfig struct {
-	Engine       *engine.Engine
-	Identity     Identity
-	Router       ResourceRouter
-	Exempt       []string         // path prefixes to skip entirely (e.g. "/healthz")
-	FailOpen     bool             // engine error → allow (true) or deny (false)
-	OnWarn       func(*http.Request, engine.Result)
-	OnDecision   func(*http.Request, engine.Result) // every check, allowed or denied
+	Engine     *engine.Engine
+	Identity   Identity
+	Router     ResourceRouter
+	Exempt     []string // path prefixes to skip entirely (e.g. "/healthz")
+	FailOpen   bool     // engine error → allow (true) or deny (false)
+	OnWarn     func(*http.Request, engine.Result)
+	OnDecision func(*http.Request, engine.Result) // every check, allowed or denied
 }
 
 // Guard wraps next with a quota check. On allow, dispatches to next. On

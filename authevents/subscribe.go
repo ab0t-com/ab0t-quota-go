@@ -19,8 +19,9 @@ import (
 // and return nil so callers can fire-and-forget without checking.
 //
 // Wire shape per `auth/output/appv2/api/events.py`:
-//   GET  /events/subscriptions          → idempotency check
-//   POST /events/subscriptions          → create
+//
+//	GET  /events/subscriptions          → idempotency check
+//	POST /events/subscriptions          → create
 type SubscribeInput struct {
 	AuthURL      string // default $AB0T_AUTH_AUTH_URL / $AUTH_SERVICE_URL
 	AdminToken   string // default $AB0T_AUTH_ADMIN_TOKEN

@@ -89,6 +89,16 @@ func (r *Registry) Bundle(name string) []string {
 	return out
 }
 
+// HasBundle reports whether a bundle name is declared (distinguishes an
+// UNKNOWN bundle from a known-but-empty one — a typo must not silently
+// disable enforcement, D-48).
+func (r *Registry) HasBundle(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.bundles[name]
+	return ok
+}
+
 // AllResources returns every registered ResourceDef. Stable order (insertion).
 func (r *Registry) AllResources() []config.ResourceDef {
 	r.mu.RLock()

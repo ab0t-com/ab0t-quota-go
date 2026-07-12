@@ -45,11 +45,11 @@ func TestSetup_DegradedMode_NoEnv_NoMeshClients(t *testing.T) {
 
 	// Required-off + WhyOff coverage
 	mustOff := map[string]bool{
-		"billing":            cap.Billing,
-		"payment":            cap.Payment,
-		"credit_grant":       cap.CreditGrant,
-		"auto_subscribe":     cap.AutoSubscribe,
-		"alerts_webhook":     cap.AlertsWebhook,
+		"billing":        cap.Billing,
+		"payment":        cap.Payment,
+		"credit_grant":   cap.CreditGrant,
+		"auto_subscribe": cap.AutoSubscribe,
+		"alerts_webhook": cap.AlertsWebhook,
 	}
 	for name, on := range mustOff {
 		if on {

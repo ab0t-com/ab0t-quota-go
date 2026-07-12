@@ -86,3 +86,33 @@ func (c *Client) RecordUsage(ctx context.Context, in RecordUsageRequest) error {
 	}
 	return nil
 }
+
+// SettleActivation calls POST /billing/{org_id}/settle — the durable,
+// activation-scoped settlement path. **D-12: the revenue-loss close.**
+//
+// Billing's /commit is state-guarded on a LIVE Redis reservation hash; past the
+// reservation window it 404s and the revenue is LOST FOREVER. This endpoint needs
+// no live hash, so a settlement arriving arbitrarily late still lands — exactly
+// once, in the correct three-bucket spend order.
+//
+// Ticket: billing/output/tickets/20260712_revenue_chain_integrity. This method is
+// the CALLER — without it, billing's settlement endpoint is a mechanism nobody
+// invokes and the money is still gone (D-64: a mechanism is not a guarantee).
+//
+// Idempotent: a replay returns 200 with Replayed=true and the ORIGINAL payload;
+// no money moves. Status codes are billing's real contract, read from its handler
+// (app/api/billing.py:720 -> app/core/reservation.py:1110):
+//
+//	409 - not eligible: /commit already took this money, or the reservation is
+//	      still live. THE BOOKS ARE CORRECT — not an error, not a revenue loss.
+//	400 - negative cost (refused; it would CREDIT the customer).
+//	404 - no billing account for this org.
+//	5xx - transient; the settlement did not land, or landed and the response was
+//	      lost. Retry — the durable key makes that safe in both readings.
+func (c *Client) SettleActivation(ctx context.Context, orgID string, in SettleActivationRequest) (*SettleActivationResponse, error) {
+	var out SettleActivationResponse
+	if err := c.http.POST(ctx, "/billing/"+orgID+"/settle", in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

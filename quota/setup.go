@@ -12,19 +12,32 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/ab0t-com/ab0t-quota-go/activations"
 	"github.com/ab0t-com/ab0t-quota-go/alerts"
 	"github.com/ab0t-com/ab0t-quota-go/authevents"
 	"github.com/ab0t-com/ab0t-quota-go/billing"
 	"github.com/ab0t-com/ab0t-quota-go/config"
 	"github.com/ab0t-com/ab0t-quota-go/counters"
+	"github.com/ab0t-com/ab0t-quota-go/ddbguard"
 	"github.com/ab0t-com/ab0t-quota-go/engine"
 	"github.com/ab0t-com/ab0t-quota-go/handlerledger"
-	"github.com/ab0t-com/ab0t-quota-go/messages"
 	"github.com/ab0t-com/ab0t-quota-go/mesh"
+	"github.com/ab0t-com/ab0t-quota-go/messages"
+	"github.com/ab0t-com/ab0t-quota-go/outbox"
 	"github.com/ab0t-com/ab0t-quota-go/payment"
 	"github.com/ab0t-com/ab0t-quota-go/providers"
+	"github.com/ab0t-com/ab0t-quota-go/reconcile"
+	"github.com/ab0t-com/ab0t-quota-go/redisguard"
 	"github.com/ab0t-com/ab0t-quota-go/registry"
 )
 
@@ -63,6 +76,26 @@ type Options struct {
 
 	// Logger replaces the default slog logger.
 	Logger *slog.Logger
+
+	// EnablePaid overrides the paid-mode assertion (D-44/D-34). nil → derive
+	// from config (billing.enable_paid) OR a wired billing mesh client. When
+	// true and the billing chain is severed (and !outbox.allow_ephemeral),
+	// Setup REFUSES to start.
+	EnablePaid *bool
+
+	// SettlementPublisher is the transport that delivers settlement events off
+	// the outbox (SNS in prod). REQUIRED for paid mode (D-56): the money-emit
+	// path is emit → durable intent → publish(this) → drain → billing. Without
+	// it the outbox is a durable store of nothing, so the gate refuses paid.
+	SettlementPublisher outbox.Publisher
+
+	// ObservedUsageProvider is the consumer's product-state truth (EXISTENCE)
+	// for the reconciler (D-33). nil ⇒ ledger-only reconciliation.
+	ObservedUsageProvider reconcile.ObservedUsageProvider
+
+	// ReconcileOrgs supplies the orgs to reconcile each pass (the library can't
+	// enumerate them). nil ⇒ the reconciler is NOT started (Capabilities says why).
+	ReconcileOrgs func() []string
 }
 
 // Quota is the configured runtime handle.
@@ -78,28 +111,80 @@ type Quota struct {
 	LedgerStore handlerledger.LedgerStore
 	PinStore    authevents.PinStore
 	Heartbeat   *billing.HeartbeatLoop
+	Outbox      *outbox.Emitter       // durable lifecycle-settlement outbox (D-44); nil when billing off/ephemeral
+	Reconciler  *reconcile.Reconciler // gauge-drift reconciler (D-62); nil when not safely runnable
 
 	webhookHandler http.Handler
 	capability     Capabilities
-	closeFns       []func() error
+	// capMu guards capability + unsafeInvariants: D-75's re-verification WRITES them from
+	// the reconciler goroutine while Healthy()/Capabilities() read them from request handlers.
+	capMu            sync.RWMutex
+	unsafeInvariants map[string]bool
+	// counterUntrusted (D-80): the Redis ALREADY evicted keys, so the counter may be
+	// under-counting live resources. The reconcile pass in the same tick converges it.
+	counterUntrusted bool
+	// outboxOnRedis (D-81): the outbox landed on Redis, so a persistence FAILURE there is
+	// money nobody can reconstruct — not a counter that heals.
+	outboxOnRedis bool
+	// redisProbe is the counter's Redis, kept for D-75's periodic re-verification.
+	redisProbe redisguard.Prober
+	closeFns   []func() error
 }
 
 // Capabilities reports which subsystems are wired ("on") and why. Emitted
 // at Setup time as a single structured log line and accessible via Q.Capabilities().
 type Capabilities struct {
-	Engine           bool   // always true
-	Enforcement      bool   // config.Enforcement.Enabled
-	ShadowMode       bool   // config.Enforcement.ShadowMode
-	Billing          bool   // billing client wired
-	Payment          bool   // payment client wired
-	Alerts           bool   // alerts manager dispatching
-	AlertsWebhook    bool   // webhook dispatcher wired
-	AuthEvents       bool   // receiver routable
-	CreditGrant      bool   // default credit-grant handler registered
-	AutoSubscribe    bool   // SubscribeOnStartup will fire
-	LedgerBackend    string // "memory" | "redis_stub" | "ddb_stub"
-	FloatStore       string // "memory" | "redis_stub"
-	WhyOff           map[string]string
+	Engine        bool   // always true
+	Enforcement   bool   // config.Enforcement.Enabled
+	ShadowMode    bool   // config.Enforcement.ShadowMode
+	Billing       bool   // billing client wired
+	Payment       bool   // payment client wired
+	Alerts        bool   // alerts manager dispatching
+	AlertsWebhook bool   // webhook dispatcher wired
+	AuthEvents    bool   // receiver routable
+	CreditGrant   bool   // default credit-grant handler registered
+	AutoSubscribe bool   // SubscribeOnStartup will fire
+	LedgerBackend string // "memory" | "redis" | "ddb" (self-reported by the store — QG-02)
+	FloatStore    string // "memory" | "redis"
+	Outbox        string // "off" | "none" | "DDB" | "Redis (...)" | "NON-DURABLE (...)"  (D-44)
+	BillingStatus string // "OFF (paid disabled)" | "ON (chain complete: ...)" | "OFF — <weakest link>"
+	Reconciler    string // "ON" | "OFF — <reason>" (D-62/D-39/D-51: absence is OFF, not healthy)
+	// RedisTopology is the D-71 machine-checked verdict on the client's Redis:
+	// "single-node[ (…assertion…)]" | "CLUSTER (unsupported)" | "unknown" | "n/a (no redis counter store)".
+	// Setup REFUSES to start on anything but single-node/n-a; the field exists so the
+	// verdict is READABLE afterwards and can FAIL Healthy() — an event with no sink is
+	// not observability (D-40).
+	RedisTopology string
+	// CounterEvictionPolicy is the D-72 verdict on the COUNTER's Redis: the maxmemory-policy
+	// read from the server, or "EVICTING/UNVERIFIED (...)". An allkeys-* policy evicts a LIVE
+	// gauge → the counter reads zero for a running resource → over-admission (D-31). Setup
+	// REFUSES to start on it; this field makes the verdict readable and FAILS Healthy().
+	CounterEvictionPolicy string
+	// RedisScripting is the D-73 verdict: "on (EVAL verified, ...)" | "OFF (...)".
+	RedisScripting string
+	// RedisVersion is the D-74 verdict: the version | "below_floor (...)" | "unknown (...)".
+	// Recorded, but NOT probe-critical (see the artifact).
+	RedisVersion string
+	// DDBHandlerLedger is the D-82/D-76 verdict on the handler-ledger table.
+	DDBHandlerLedger string
+	// RedisPersistStatus is the D-81 verdict — the FACT, not the config. `appendonly yes` says
+	// what SHOULD happen; aof_last_write_status says what DID. A failing AOF on the Redis
+	// holding the OUTBOX is money nobody can reconstruct.
+	RedisPersistStatus string
+	// CounterEvictionsObserved is the D-80 verdict — the FACT, not the policy. A Redis that has
+	// ALREADY evicted keys passes every policy check we own while an evicted gauge sits
+	// under-counted in the counter. "0 (…)" | "evictions_observed (…)" | "unknown".
+	CounterEvictionsObserved string
+	// PreflightReverification is the D-79 derived contract: if the counter lives on Redis, its
+	// invariants MUST be re-verified (the D-75 re-check rides the reconciler loop). A client who
+	// switches the reconciler off no longer switches the GUARANTEE off silently — this reads
+	// OFF and FAILS Healthy(). "on (rides the reconciler loop)" | "OFF — <reason>".
+	PreflightReverification string
+	// MemoryHeadroom is the D-77 verdict: "<pct>% of maxmemory used" | "low_headroom (...)" |
+	// "unbounded (...)" | "unknown". `noeviction` fails CLOSED at the cliff (safe) but the
+	// service DIES — so the cliff must be visible BEFORE 3am. Degrades on a READ low-headroom.
+	MemoryHeadroom string
+	WhyOff         map[string]string
 }
 
 // Setup constructs a Quota.
@@ -131,12 +216,89 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	}
 
 	reg := registry.New(cfg)
-	factory := counters.NewMemoryFactory(counters.KeyPrefix(cfg.Storage.RedisKeyPrefix))
-	cap.FloatStore = "memory"
+
+	// Counter storage (TASK P5.1 / findings QG-01/QG-02). A configured
+	// redis_url builds a durable go-redis factory whose counters survive
+	// restart and are shared across replicas. If the URL is malformed or
+	// the server is unreachable, degrade LOUDLY to memory and say so in
+	// Capabilities — never silently (that was the QG-01/QG-02 bug).
+	var (
+		factory     *counters.Factory
+		redisClient *redis.Client
+	)
+	// Key prefix (D-17 / finding QG-07). Python has NO prefix knob — it
+	// hardcodes the "quota" head. A non-default Go prefix can ONLY diverge
+	// the keyspace off a Python fleet (the exact bug class this lane kills),
+	// and it has no correct non-default value today, so it is REJECTED at
+	// startup rather than warned about ("a warning nobody reads is fail-open
+	// with extra steps"). Fail closed: refuse to boot with a forking prefix.
+	prefixStr := cfg.Storage.RedisKeyPrefix
+	if prefixStr == "" {
+		prefixStr = "quota"
+	} else if prefixStr != "quota" {
+		return nil, fmt.Errorf(
+			"quota.Setup: storage.redis_key_prefix=%q is not permitted — Python hardcodes the "+
+				"\"quota\" key head, so any other prefix forks the keyspace and breaks cross-runtime "+
+				"parity (finding QG-07/D-17). Unset it or set it to \"quota\"", prefixStr)
+	}
+	prefix := counters.KeyPrefix(prefixStr)
 	if cfg.Storage.RedisURL != "" {
-		cap.WhyOff["redis_store"] = "v0.1.0 ships in-memory only; redis store wires in v0.2"
-		slog.Warn("redis storage configured but stub backend in use; counters are process-local",
-			"redis_url", cfg.Storage.RedisURL)
+		client, rerr := newRedisClient(ctx, cfg.Storage)
+		if rerr != nil {
+			cap.FloatStore = "memory"
+			cap.RedisTopology = TopologyNA
+			cap.WhyOff["redis_store"] = "redis configured but unavailable: " + rerr.Error()
+			slog.Warn("counters: redis configured but UNAVAILABLE — DEGRADED to in-memory. "+
+				"Counters are process-local; usage is lost on restart and each replica enforces its own limit.",
+				"redis_url", cfg.Storage.RedisURL, "err", rerr)
+			factory = counters.NewMemoryFactory(prefix)
+		} else {
+			// D-71 — machine-check the Redis TOPOLOGY before anything touches the
+			// counter. The counter's Lua scripts are multi-key and CROSSSLOT on a
+			// Redis Cluster (D-23, observed at a real cluster); our prod is
+			// single-node, so only a CLIENT would ever hit it — which is exactly why
+			// a LIBRARY may not assume it. Refuse LOUDLY at startup instead of
+			// breaking silently at the first Acquire. Same shape as D-32's durability
+			// machine-check. The verdict is recorded in Capabilities BEFORE any
+			// refusal, so the cause is readable.
+			topo, detail := CheckRedisClusterTopology(ctx, client, clusterConfirmedDisabled(cfg.Storage))
+			cap.RedisTopology = TopologyCapabilityValue(topo, detail)
+			if topo != TopologySingleNode {
+				_ = client.Close()
+				slog.Error("REDIS TOPOLOGY UNSUPPORTED/UNVERIFIED (D-71) — refusing to start",
+					"topology", topo, "detail", detail)
+				return nil, TopologyError(topo, detail)
+			}
+			slog.Info("redis topology verified (D-71)", "detail", detail)
+
+			// D-72/D-73/D-74 — the rest of the Redis preflight, in order of how QUIETLY
+			// each fails. D-72 is the urgent one: an `allkeys-*` Redis evicts a LIVE
+			// gauge, the counter reads zero for a resource that is still running, and
+			// admission silently over-grants (D-31's forbidden direction) — at runtime,
+			// as free quota, behind a green health check. D-71 at least refuses loudly.
+			if err := gateCounterStore(ctx, client, cfg, &cap); err != nil {
+				_ = client.Close()
+				return nil, err
+			}
+			redisClient = client
+			f, ferr := counters.NewRedisFactory(client, prefix)
+			if ferr != nil {
+				// Should not happen (client is non-nil), but stay honest.
+				cap.FloatStore = "memory"
+				cap.WhyOff["redis_store"] = "redis factory build failed: " + ferr.Error()
+				slog.Warn("counters: redis factory build failed — DEGRADED to in-memory", "err", ferr)
+				factory = counters.NewMemoryFactory(prefix)
+			} else {
+				cap.FloatStore = "redis"
+				factory = f
+			}
+		}
+	} else {
+		cap.FloatStore = "memory"
+		// D-71: no Redis counter store ⇒ no cluster to CROSSSLOT on. An affirmative
+		// "not applicable", never a silent absence (D-51).
+		cap.RedisTopology = TopologyNA
+		factory = counters.NewMemoryFactory(prefix)
 	}
 
 	q := &Quota{
@@ -145,12 +307,18 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		Registry: reg,
 		Messages: messages.New(messages.Templates{}),
 	}
+	if redisClient != nil {
+		q.redisProbe = redisClient // D-75: the counter's Redis, re-verified every reconcile pass
+	}
 	q.Engine = &engine.Engine{
 		Cfg:      cfg,
 		Reg:      reg,
 		Provider: prov,
 		Factory:  factory,
 		Messages: q.Messages,
+	}
+	if redisClient != nil {
+		q.closeFns = append(q.closeFns, redisClient.Close)
 	}
 	cap.Enforcement = cfg.Enforcement.Enabled
 	cap.ShadowMode = cfg.Enforcement.ShadowMode
@@ -165,6 +333,12 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		if err == nil {
 			q.Billing = c
 			cap.Billing = true
+			// D4 (QB-04) — wire + START the heartbeat. Previously only Stop()
+			// was called; Start() had no caller, so the loop never beat —
+			// dormant safety code that creates false confidence. It now runs
+			// while billing is wired; Close() stops it.
+			q.Heartbeat = &billing.HeartbeatLoop{Client: c, ServiceName: cfg.ServiceName, Version: "go"}
+			q.Heartbeat.Start(context.Background())
 		} else {
 			cap.WhyOff["billing"] = err.Error()
 		}
@@ -197,15 +371,79 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		}
 		q.Alerts = alerts.NewManager(cfg.Alerts, dispatcher)
 		cap.Alerts = true
+		// D-26: subscribe the engine's over-admission events to the alert
+		// manager. Dependency inverted — the engine publishes to OnEvent (a
+		// seam it owns) and setup forwards here, so the engine never imports
+		// alerts (no cycle). Without this the over_limit_admitted event has
+		// no sink and D-24 B's observability premise is unmet.
+		am := q.Alerts
+		q.Engine.OnEvent = func(ctx context.Context, ev engine.QuotaEvent) {
+			am.NotifyQuotaEvent(ctx, ev)
+		}
 	} else {
 		cap.WhyOff["alerts"] = "config.alerts.enabled = false"
 	}
 
-	// Auth events.
-	q.LedgerStore = handlerledger.NewInMemoryLedgerStore()
-	cap.LedgerBackend = "memory"
-	if cfg.Storage.DynamoDBTable != "" || cfg.Storage.RedisURL != "" {
-		cap.WhyOff["ledger_persistent"] = "v0.1.0 ships in-memory ledger; persistent backends wire in v0.2"
+	// Auth events. Handler ledger provides durable idempotency for
+	// money-adjacent auth events (credit grants). Backend selection +
+	// truthful degradation live in handlerledger.AutoSelectStore (priority
+	// DDB > Redis > memory; TASK P1.7/P5.1). Both real backends are wired:
+	// DDB via aws-sdk (verified against DynamoDB Local), Redis reuses the
+	// counter client. The store self-reports its actual backend (QG-02).
+	// NB: assign Redis only when non-nil — a typed-nil *redis.Client boxed
+	// into the interface{} field reads as non-nil (Go nil-interface gotcha)
+	// and would make AutoSelectStore wrongly pick Redis in degraded mode.
+	ledgerOpts := handlerledger.AutoSelectOptions{}
+	if redisClient != nil {
+		ledgerOpts.Redis = redisClient
+	}
+	if cfg.Storage.DynamoDBTable != "" {
+		if ddbClient, derr := newDDBClient(ctx, cfg.Storage); derr == nil {
+			ledgerOpts.DDBClient = ddbClient
+			ledgerOpts.DDBTable = cfg.Storage.DynamoDBTable
+		} else {
+			cap.WhyOff["ledger_ddb"] = "dynamodb_table set but client build failed: " + derr.Error()
+			slog.Warn("handler ledger: DDB configured but client build failed — will fall back", "err", derr)
+		}
+	}
+	q.LedgerStore = handlerledger.AutoSelectStore(ledgerOpts)
+
+	// D-82 — the handler ledger PROVISIONS its table and is PREFLIGHTED (D-76), exactly like
+	// the outbox and the activation store. It used to ASSUME the table existed: a client who
+	// wired it hit ResourceNotFoundException at their FIRST auth webhook, in production. It
+	// stayed invisible for the most instructive reason (D-78): the only thing that had ever
+	// exercised it was a fake — and a fake never notices, because a fake creates nothing.
+	if prov, ok := q.LedgerStore.(interface {
+		EnsureTable(context.Context, time.Duration) error
+		Table() string
+	}); ok && ledgerOpts.DDBClient != nil {
+		if err := prov.EnsureTable(ctx, 60*time.Second); err != nil {
+			return nil, fmt.Errorf("quota.Setup: handler-ledger table (D-82): %w", err)
+		}
+		if dc, ok := ledgerOpts.DDBClient.(ddbguard.Describer); ok {
+			pitr := cfg.Storage.DDBPITRConfirmed || ddbguard.EnvPITRConfirmed()
+			value, fatal, warn := ddbguard.VerifyTable(ctx, dc, prov.Table(), "ttl", pitr)
+			if warn != "" {
+				slog.Warn("DDB preflight WARNING (D-76/D-82)", "capability", "ddb_handler_ledger", "detail", warn)
+			}
+			if fatal != "" {
+				slog.Error("HANDLER-LEDGER TABLE UNSAFE (D-76/D-82)", "detail", fatal)
+				return nil, ddbguard.PreflightError("handler_ledger", fatal)
+			}
+			cap.DDBHandlerLedger = value
+		}
+	}
+	if b, ok := q.LedgerStore.(handlerledger.Backended); ok {
+		cap.LedgerBackend = b.Backend()
+	} else {
+		cap.LedgerBackend = "memory"
+	}
+	if cap.LedgerBackend == "memory" {
+		if cfg.Storage.DynamoDBTable != "" {
+			cap.WhyOff["ledger_persistent"] = "ddb configured but unavailable; ledger degraded to in-memory (see ledger_ddb WhyOff)"
+		} else if cfg.Storage.RedisURL != "" {
+			cap.WhyOff["ledger_persistent"] = "redis unavailable; ledger degraded to in-memory (see redis_store WhyOff)"
+		}
 	}
 	q.PinStore = authevents.NewMemoryPinStore()
 	cap.AuthEvents = true
@@ -242,13 +480,360 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		}()
 	}
 
+	// D-39 — the activation ledger is authoritative for identity + cost, so it
+	// must be DURABLE. Self-provision a DDB activation store when DDB is
+	// reachable; the engine falls back to its loud in-memory default otherwise.
+	// (Redis-under-durability-check + the reconciler's refuse-gate are a later
+	// leg; here we make the durable store the default when available.)
+	if ddbSignalPresent(cfg) {
+		if ddbClient, derr := newDDBClient(ctx, cfg.Storage); derr == nil {
+			as := activations.NewDDBStore(ddbClient, "", 0) // dedicated table (ab0t_quota_activations)
+			if eerr := as.EnsureTable(ctx, 60*time.Second); eerr == nil {
+				q.Engine.Activations = as
+				cap.WhyOff["activation_store"] = "" // durable
+				slog.Info("activation store: DDB (durable)")
+			} else {
+				slog.Warn("activation store: DDB configured but table not ready — using in-memory (NOT durable)", "err", eerr)
+				cap.WhyOff["activation_store"] = "ddb configured but unavailable; in-memory (NOT durable — D-39)"
+			}
+		}
+	}
+
+	// D-62/D-33/D-39 — the library reconciler. Started (a real goroutine, not a
+	// dead worker) ONLY when it is safe: a durable activation ledger, a
+	// recent-activity guard (wired by default from the engine's touch-tracking),
+	// and a consumer-supplied org source. Otherwise Capabilities reports
+	// reconciler=OFF with the reason — absence is OFF, never silently healthy.
+	q.Reconciler = q.wireReconciler(cfg, opts, &cap)
+
+	// D-79 — DERIVE the re-verification requirement from CONFIG, never from the wiring
+	// (D-66's law: wiring SATISFIES a contract, it does not DEFINE one). The D-75 re-check
+	// rides the reconciler loop, which a client can switch off — so if the counter lives on
+	// Redis, a missing re-verification is a MISSING GUARANTEE and must fail Healthy(). It can
+	// no longer disappear quietly. NOTE the subtlety: a LIVE reconciler with no preflight
+	// wired onto it is NOT the guarantee — liveness of the carrier is not delivery of the cargo.
+	if cfg.Storage.RedisURL != "" && cap.FloatStore == "redis" {
+		switch {
+		case q.Reconciler == nil:
+			cap.PreflightReverification = "OFF — no reconciler loop, so the Redis invariants " +
+				"(topology/eviction/scripting/version/headroom) are NEVER re-verified after boot (D-75/D-79)"
+			cap.WhyOff["preflight_reverification"] = "reconciler not running"
+			slog.Error("PREFLIGHT RE-VERIFICATION IS OFF (D-79) — the counter is on Redis, but no " +
+				"reconciler loop is running to re-verify its invariants. A config change under a running " +
+				"process (allkeys-lru at 3am) would go unnoticed. Health is DEGRADED.")
+		case q.Reconciler.Preflight == nil:
+			cap.PreflightReverification = "OFF — the reconciler loop runs but carries no preflight (D-79)"
+			cap.WhyOff["preflight_reverification"] = "no preflight wired onto the reconciler"
+		default:
+			cap.PreflightReverification = "on (rides the reconciler loop)"
+		}
+	} else {
+		cap.PreflightReverification = "n/a (no redis counter store)"
+	}
+
+	// D-44 / D-34 — the fail-closed billing gate. A paid service that cannot
+	// durably record billing must NOT come up serving billable work for free
+	// (that IS QB-01, through a different door). Resolve a durable outbox; if
+	// none and enable_paid and !allow_ephemeral, REFUSE to start. Do this LAST
+	// so q.Billing (mesh-wired) is known — wiring billing IS an assertion of
+	// paid intent. Explicit override: billing.enable_paid, or Options.EnablePaid.
+	enablePaid := cfg.Billing.EnablePaid || q.Billing != nil
+	if opts.EnablePaid != nil {
+		enablePaid = *opts.EnablePaid
+	}
+	// D-56/D-63 — auto-wire the concrete SNS settlement publisher from config
+	// when the consumer didn't supply one, so a config-only paid service gets a
+	// WORKING chain (not merely a safely-refused one).
+	publisher := opts.SettlementPublisher
+	if publisher == nil && cfg.Outbox.SNSTopicARN != "" {
+		if sc, serr := newSNSClient(ctx, cfg.Outbox); serr == nil {
+			publisher = outbox.NewSNSPublisher(sc, cfg.Outbox.SNSTopicARN)
+			slog.Info("settlement publisher: SNS (auto-wired from config)", "topic", cfg.Outbox.SNSTopicARN)
+		} else {
+			slog.Error("settlement publisher: SNS configured but client build failed", "err", serr)
+		}
+	}
+	if err := q.gateBillingChain(ctx, cfg, redisClient, publisher, enablePaid, &cap); err != nil {
+		return nil, err
+	}
+
 	q.capability = cap
 	logCapabilities(cap)
 	return q, nil
 }
 
+// gateBillingChain applies D-56: bill only when the WHOLE chain exists —
+// emit → durable intent → publish → drain → sink → billing. A gate on one
+// link is satisfiable while the chain is severed; "has a durable outbox" was
+// never the guarantee, "usage reaches billing" is. Each link needs a POSITIVE
+// signal; absence is UNKNOWN and unknown FAILS CLOSED (D-51). Capabilities
+// names the WEAKEST link — never a cheerful ON because one component exists.
+func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisClient *redis.Client, publisher outbox.Publisher, enablePaid bool, cap *Capabilities) error {
+	// Assess every link. ok=true is the required positive signal.
+	store, durable, detail := outbox.Store(nil), false, "none"
+	if cfg.Outbox.OutboxEnabled() {
+		store, durable, detail = resolveDurableOutbox(ctx, cfg, redisClient)
+		// D-81: if the outbox landed on Redis, a persistence FAILURE there is money nobody can
+		// reconstruct — not a counter that heals. The runtime re-check grades it accordingly.
+		if redisClient != nil && !strings.HasPrefix(detail, "DDB") {
+			q.capMu.Lock()
+			q.outboxOnRedis = true
+			q.capMu.Unlock()
+		}
+	} else {
+		detail = "outbox.enabled=false"
+	}
+	links := []struct {
+		name string
+		ok   bool
+		why  string
+	}{
+		{"durable_store", durable, "no durable outbox (" + detail + ")"},
+		{"publisher", publisher != nil, "no settlement publisher wired (Options.SettlementPublisher)"},
+		{"billing_sink", q.Billing != nil, "no billing sink (AB0T_QUOTA_BILLING_URL not set)"},
+	}
+	cap.Outbox = detail
+	if durable {
+		cap.Outbox = detail
+	} else {
+		cap.Outbox = "NON-DURABLE (" + detail + ")"
+	}
+
+	// Weakest (first-missing) link.
+	weakest := ""
+	for _, l := range links {
+		if !l.ok {
+			weakest = l.why
+			break
+		}
+	}
+
+	if weakest == "" {
+		// Whole chain present → wire the emitter with the publisher AND start
+		// the drain loop (a durable store nobody drains is a store of nothing).
+		horizon := cfg.Outbox.MaxRetryHorizonSeconds
+		em := outbox.NewEmitter(store, publisher, horizon, cfg.Outbox.PastHorizon)
+		if q.Alerts != nil { // (e) settlement voids → money-incident alerts
+			am := q.Alerts
+			em.OnVoid = func(v outbox.VoidEntry) {
+				am.NotifyVoid(context.Background(), v.ReservationID, v.EventType, v.Reason)
+			}
+		}
+		// D-12 (the CALLER leg): the settlement fallback. Billing's durable settlement path
+		// closes the revenue-loss hole — but ONLY if something calls it. Without this, the
+		// emitter keeps voiding-and-alerting past the horizon and the money is still gone:
+		// a mechanism with no caller (D-64). q.Billing is non-nil here by construction — the
+		// "billing_sink" link above is part of the chain this branch requires.
+		// Ticket: billing/output/tickets/20260712_revenue_chain_integrity
+		if q.Billing != nil {
+			em.SetSettler(billingSettler{c: q.Billing})
+			slog.Info("D-12: outbox settlement fallback ARMED — a money event past its " +
+				"reservation window will be SETTLED against billing, not voided")
+		}
+		q.Outbox = em
+		drainCtx, cancel := context.WithCancel(context.Background())
+		q.closeFns = append(q.closeFns, func() error { cancel(); return nil })
+		interval := time.Duration(cfg.Outbox.DrainIntervalSeconds) * time.Second
+		maxPer := cfg.Outbox.MaxPerPass
+		go em.RunDrainLoop(drainCtx, interval, maxPer)
+		cap.BillingStatus = "ON (chain complete: outbox=" + detail + ")"
+		slog.Info("billing chain complete — drain loop started", "outbox", detail)
+		return nil
+	}
+
+	// Chain severed.
+	if !enablePaid {
+		cap.BillingStatus = "OFF (paid disabled)"
+		return nil
+	}
+	if cfg.Outbox.AllowEphemeral {
+		cap.BillingStatus = "OFF — " + weakest + " (allow_ephemeral=true)"
+		cap.WhyOff["billing"] = weakest + "; allow_ephemeral=true (DEV) — billing DISABLED"
+		slog.Error("BILLING DISABLED: billing chain severed (allow_ephemeral=true, DEV)", "weakest_link", weakest)
+		return nil
+	}
+	cap.BillingStatus = "OFF — " + weakest
+	return billingChainError(weakest)
+}
+
+// BillingHealthy reports whether the billing chain is complete (a health probe
+// that FAILS while any link is missing — D-56/D-40). A missing link is not
+// healthy; it is unknown, and unknown is unhealthy (D-51).
+func (q *Quota) BillingHealthy() (bool, string) {
+	if strings.HasPrefix(q.capability.BillingStatus, "ON") {
+		return true, q.capability.BillingStatus
+	}
+	return false, q.capability.BillingStatus
+}
+
+// Healthy is the Capabilities CONSUMER (f): a money-aware health surface that
+// FAILS when billing OR the reconciler is OFF. Absence of a positive signal is
+// UNKNOWN, and unknown fails closed (D-49/D-51) — a service that never wired
+// integrity must degrade, never report OK. Returns (healthy, per-subsystem
+// reasons) for a /healthz or /capabilities handler.
+func (q *Quota) Healthy() (bool, map[string]string) {
+	q.capMu.RLock()
+	defer q.capMu.RUnlock()
+	reasons := map[string]string{
+		"billing":                    q.capability.BillingStatus,
+		"reconciler":                 q.capability.Reconciler,
+		"redis_topology":             q.capability.RedisTopology,
+		"counter_eviction_policy":    q.capability.CounterEvictionPolicy,
+		"redis_scripting":            q.capability.RedisScripting,
+		"memory_headroom":            q.capability.MemoryHeadroom,
+		"counter_evictions_observed": q.capability.CounterEvictionsObserved,
+		"preflight_reverification":   q.capability.PreflightReverification,
+		"redis_persist_status":       q.capability.RedisPersistStatus,
+	}
+	billingOK := strings.HasPrefix(q.capability.BillingStatus, "ON") || q.capability.BillingStatus == "OFF (paid disabled)"
+	reconcilerOK := q.capability.Reconciler == "ON" || q.capability.Reconciler == "OFF — not requested"
+	// D-71 — an unsupported/unverified Redis topology is a service whose counter
+	// primitive cannot run (CROSSSLOT). Setup refuses to start on it, so a live
+	// process should never show it; the probe judges it anyway, because a capability
+	// nothing reads is the defect this ticket met eight times. Absence ⇒ not healthy
+	// (D-49/D-51).
+	topologyOK := TopologyOK(q.capability.RedisTopology)
+	// D-72/D-73 — an evicting (or unverified) counter store silently over-admits, and a
+	// Redis that cannot run our Lua cannot count at all. Setup refuses to start on either,
+	// so a live process should never show them; the probe judges them anyway, because a
+	// capability nothing reads is the defect this ticket met eight times. Absence ⇒ not
+	// healthy (D-49/D-51). An in-memory counter store (no Redis) reports n/a and is exempt.
+	counterOK := q.capability.FloatStore != "redis" || CounterStoreOK(q.capability.CounterEvictionPolicy)
+	scriptOK := q.capability.FloatStore != "redis" || ScriptingOK(q.capability.RedisScripting)
+	// D-77 — the memory cliff must be visible BEFORE the service dies at it.
+	memOK := redisguard.MemoryHeadroomOK(q.capability.MemoryHeadroom)
+	// D-80 — the FACT. An observed eviction is a money incident even if the policy now reads clean.
+	factsOK := q.capability.FloatStore != "redis" ||
+		redisguard.EvictionFactsOK(q.capability.CounterEvictionsObserved)
+	// D-79 — a guarantee the client can switch off SILENTLY is not a guarantee. If the counter is
+	// on Redis, the re-verification is REQUIRED (derived from config, D-66): absent ⇒ degraded.
+	reverifyOK := q.capability.FloatStore != "redis" ||
+		strings.HasPrefix(q.capability.PreflightReverification, "on") ||
+		strings.HasPrefix(q.capability.PreflightReverification, "n/a")
+	// D-81 — a Redis that is FAILING to persist is not durable, however green `appendonly` reads.
+	persistOK := redisguard.PersistFactsOK(q.capability.RedisPersistStatus)
+	return billingOK && reconcilerOK && topologyOK && counterOK && scriptOK && memOK &&
+		factsOK && reverifyOK && persistOK, reasons
+}
+
+// wireReconciler starts the reconciler loop when — and only when — it is safe
+// (durable ledger + guard + org source). Otherwise it returns nil and records
+// the reason (D-62/D-39/D-51: absence is OFF, never silently healthy).
+func (q *Quota) wireReconciler(cfg *config.Config, opts Options, cap *Capabilities) *reconcile.Reconciler {
+	if opts.ReconcileOrgs == nil {
+		cap.Reconciler = "OFF — not requested"
+		return nil
+	}
+	d, ok := q.Engine.Activations.(interface{ Durable() bool })
+	if !ok || !d.Durable() {
+		cap.Reconciler = "OFF — activation store not durable (D-39); wire a durable (DDB) activation store"
+		slog.Error("reconciler OFF — non-durable activation ledger (D-39)")
+		return nil
+	}
+	guardWindow := 120 * time.Second
+	interval := time.Duration(cfg.Reconciliation.IntervalSeconds) * time.Second
+	r := &reconcile.Reconciler{
+		Store: q.Engine.Activations, Factory: q.Engine.Factory, Reg: q.Registry,
+		Provider:        opts.ObservedUsageProvider,
+		RecentlyTouched: q.Engine.TouchGuard(guardWindow), // zero-config guard (D-62)
+	}
+	if q.Alerts != nil {
+		am := q.Alerts
+		r.OnDrift = func(a reconcile.DriftAlert) { // (e) money incident → alert sink
+			am.NotifyDrift(context.Background(), a.OrgID, a.ResourceKey, a.Source, a.UnsettleableLive)
+		}
+	}
+	// D-75 — the periodic re-verification RIDES this loop (never its own worker: one more
+	// loop is one more thing that can be dead, D-50). Every boot guard we own verified the
+	// world once and then trusted it forever; this is what notices when it changes.
+	//
+	// NOTE (framed, not hidden): with no Redis counter store, or no reconciler, nothing
+	// re-verifies — but BOTH of those states ALREADY degrade Healthy() (FloatStore=memory is
+	// loudly recorded; Reconciler=OFF fails the probe), so the deployment is not silently
+	// trusting a stale verdict; it is loudly degraded for a broader reason.
+	if q.redisProbe != nil {
+		r.Preflight = q.makeRevalidator(q.redisProbe, cfg)
+	}
+	rc, cancel := context.WithCancel(context.Background())
+	q.closeFns = append(q.closeFns, func() error { cancel(); return nil })
+	go r.RunLoop(rc, interval, opts.ReconcileOrgs)
+	cap.Reconciler = "ON"
+	return r
+}
+
+func billingChainError(weakest string) error {
+	return fmt.Errorf(
+		"quota.Setup: enable_paid but the billing chain is SEVERED — %s. A gate on one link is "+
+			"satisfiable while the chain is broken; the guarantee is 'usage reaches billing', not 'a component "+
+			"exists' (D-56). A paid service that starts and bills nothing is QB-01 through the front door. Fix "+
+			"the missing link, or set outbox.allow_ephemeral=true to start with billing DISABLED (dev only)", weakest)
+}
+
+// resolveDurableOutbox picks a durable outbox store: DDB (self-provisioned)
+// preferred, else Redis under a durability machine-check, else none. A DDB
+// self-provision is attempted only when there is an AWS signal (a Go process
+// with no AWS config cannot self-provision anyway — Go-native divergence from
+// Python's unconditional attempt; framed in the leg artifact).
+func resolveDurableOutbox(ctx context.Context, cfg *config.Config, redisClient *redis.Client) (outbox.Store, bool, string) {
+	storePref := strings.ToLower(cfg.Outbox.Store)
+	if storePref != "redis" && ddbSignalPresent(cfg) {
+		attempts := cfg.Outbox.ProvisionRetryAttempts
+		if attempts <= 0 {
+			attempts = 3
+		}
+		table := cfg.Outbox.DDBTable
+		if table == "" {
+			table = "ab0t_quota_outbox"
+		}
+		for i := 1; i <= attempts; i++ {
+			client, err := newDDBClient(ctx, cfg.Storage)
+			if err == nil {
+				ds := outbox.NewDDBStore(client, table)
+				if eerr := ds.EnsureTable(ctx, 60*time.Second); eerr == nil {
+					// D-76 — the outbox holds MONEY events nothing can reconstruct, and until
+					// now nothing checked the table it lives in. Verify it (ACTIVE, GSIs ACTIVE,
+					// TTL on the attribute we actually write, PITR on) before we trust it.
+					pitrConfirmed := cfg.Storage.DDBPITRConfirmed || ddbguard.EnvPITRConfirmed()
+					value, fatal, warn := ddbguard.VerifyTable(ctx, client, table, "ttl", pitrConfirmed)
+					if warn != "" {
+						slog.Warn("DDB preflight WARNING (D-76)", "capability", "ddb_outbox", "detail", warn)
+					}
+					if fatal != "" {
+						slog.Error("DDB STORE UNSAFE (D-76)", "capability", "ddb_outbox", "detail", fatal)
+						return nil, false, "DDB UNSAFE (" + fatal + ")"
+					}
+					slog.Info("DDB preflight verified (D-76)", "capability", "ddb_outbox", "detail", value)
+					return ds, true, "DDB"
+				} else {
+					slog.Warn("outbox DDB provision failed", "attempt", i, "err", eerr)
+				}
+			}
+			if i < attempts {
+				time.Sleep(time.Duration(i) * 300 * time.Millisecond) // bounded backoff
+			}
+		}
+		slog.Error("outbox DDB unavailable after retries — treating as ABSENT")
+	}
+	if redisClient != nil {
+		durable, detail := outbox.CheckRedisDurability(ctx, redisClient, cfg.Outbox.RedisDurabilityConfirmed)
+		return outbox.NewRedisStore(redisClient, "outbox"), durable, detail
+	}
+	return nil, false, "none"
+}
+
+func ddbSignalPresent(cfg *config.Config) bool {
+	return strings.ToLower(cfg.Outbox.Store) == "ddb" ||
+		cfg.Storage.DynamoDBTable != "" ||
+		cfg.Outbox.DDBTable != "" ||
+		os.Getenv("AWS_ENDPOINT_URL") != ""
+}
+
 // Capabilities returns the snapshot.
-func (q *Quota) Capabilities() Capabilities { return q.capability }
+func (q *Quota) Capabilities() Capabilities {
+	q.capMu.RLock()
+	defer q.capMu.RUnlock()
+	return q.capability
+}
 
 // Close releases background goroutines + Persistence connections in safe
 // order: stop heartbeat → flush ledger → close clients.
@@ -263,6 +848,70 @@ func (q *Quota) Close(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// newRedisClient builds + pings a go-redis client from StorageConfig
+// (TASK P5.1). A ping failure returns an error so the caller degrades
+// loudly to in-memory rather than handing back a client that silently
+// fails every op. redis_password overrides any password in the URL.
+func newRedisClient(ctx context.Context, sc config.StorageConfig) (*redis.Client, error) {
+	opt, err := redis.ParseURL(sc.RedisURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis_url: %w", err)
+	}
+	if sc.RedisPassword != "" {
+		opt.Password = sc.RedisPassword
+	}
+	client := redis.NewClient(opt)
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("redis ping: %w", err)
+	}
+	return client, nil
+}
+
+// newDDBClient builds an aws-sdk DynamoDB client for the handler ledger
+// (TASK P5.1). Region from storage.dynamodb_region (default us-west-2);
+// AWS_ENDPOINT_URL overrides the endpoint (DynamoDB Local / LocalStack).
+// Credentials come from the default chain (env / instance role).
+func newDDBClient(ctx context.Context, sc config.StorageConfig) (*dynamodb.Client, error) {
+	region := sc.DynamoDBRegion
+	if region == "" {
+		region = "us-west-2"
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+	var opts []func(*dynamodb.Options)
+	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
+		opts = append(opts, func(o *dynamodb.Options) { o.BaseEndpoint = aws.String(ep) })
+	}
+	return dynamodb.NewFromConfig(awsCfg, opts...), nil
+}
+
+// newSNSClient builds an aws-sdk SNS client for the settlement publisher
+// (D-56). Region from outbox.sns_region (default AWS_REGION);
+// AWS_ENDPOINT_URL overrides the endpoint (LocalStack).
+func newSNSClient(ctx context.Context, oc config.OutboxConfig) (*sns.Client, error) {
+	region := oc.SNSRegion
+	if region == "" {
+		region = os.Getenv("AWS_REGION")
+	}
+	if region == "" {
+		region = "us-east-1"
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+	var opts []func(*sns.Options)
+	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
+		opts = append(opts, func(o *sns.Options) { o.BaseEndpoint = aws.String(ep) })
+	}
+	return sns.NewFromConfig(awsCfg, opts...), nil
 }
 
 // providerAdapter bridges providers.Provider → authevents.TierProvider.
@@ -286,6 +935,14 @@ func logCapabilities(c Capabilities) {
 		"auto_subscribe", c.AutoSubscribe,
 		"ledger", c.LedgerBackend,
 		"float_store", c.FloatStore,
+		"redis_topology", c.RedisTopology, // D-71
+		"counter_eviction_policy", c.CounterEvictionPolicy, // D-72
+		"redis_scripting", c.RedisScripting, // D-73
+		"redis_version", c.RedisVersion, // D-74
+		"memory_headroom", c.MemoryHeadroom, // D-77
+		"counter_evictions_observed", c.CounterEvictionsObserved, // D-80
+		"redis_persist_status", c.RedisPersistStatus, // D-81
+		"preflight_reverification", c.PreflightReverification, // D-79
 	}
 	for k, v := range c.WhyOff {
 		attrs = append(attrs, "off:"+k, v)

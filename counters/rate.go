@@ -9,9 +9,12 @@ import (
 // Rate is a sliding-window counter. Backed by a sorted set in Redis
 // (timestamp → unique id) or an in-process []int64 in memory.
 //
-// Wire-level: Python lib uses a Redis ZSET keyed on
-// `quota:rate:{resource}:{scope}` with member = timestamp_ns string and
-// score = timestamp_ns float. The Go port matches.
+// Wire-level: the Python parity key is `quota:{org}:{rk}:rate` — built by
+// OrgKey in keys_python.go, which the engine uses. Key() below is the
+// DEPRECATED pre-P5.3 shape (finding QG-03). NOTE QG-06: the ZSET SCORES
+// still diverge — Python scores epoch SECONDS, this port epoch NANOSECONDS
+// — so a shared rate key is not yet cross-runtime safe even with parity
+// key names; that is QG-06's fix.
 type Rate struct {
 	Store       RateStore
 	Prefix      KeyPrefix

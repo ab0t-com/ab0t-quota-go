@@ -1,0 +1,70 @@
+{
+  "acquire_at_limit": {
+    "activation_id_minted": [
+      true,
+      true,
+      false
+    ],
+    "admitted": [
+      true,
+      true,
+      false
+    ],
+    "gauge": 2.0
+  },
+  "concurrent_release_one_id": {
+    "gauge": 1.0,
+    "performed_count": 1
+  },
+  "double_release": {
+    "first_performed": true,
+    "gauge_after_first": 0.0,
+    "gauge_after_second": 0.0,
+    "second_performed": false
+  },
+  "duplicate_acquire_same_idem": {
+    "first": {
+      "activation_id_minted": true,
+      "admitted": true,
+      "reason": "ok"
+    },
+    "gauge": 1.0,
+    "replay": {
+      "activation_id_minted": false,
+      "admitted": true,
+      "reason": "dup"
+    }
+  },
+  "legacy_floor": {
+    "decrement_5_from_1": 0.0,
+    "decrement_at_zero": 0.0
+  },
+  "legacy_negative_delta_magnitude": {
+    "decrement_minus2_after": 6.0,
+    "increment_minus3_from_5": 8.0
+  },
+  "per_user_acquire_release": {
+    "admitted": true,
+    "org_gauge_after_release": 0.0,
+    "release_performed": true,
+    "seq_after_acquire": 1.0,
+    "user_gauge_after_acquire": 1.0,
+    "user_gauge_after_release": 0.0
+  },
+  "release_unknown_id": {
+    "gauge": 1.0,
+    "performed": false
+  },
+  "settle_after_release": {
+    "gauge": 0.0,
+    "released": true,
+    "settle_replay": false,
+    "settled": true
+  },
+  "settle_without_release": {
+    "gauge_after_release_attempt": 1.0,
+    "gauge_after_settle": 1.0,
+    "release_after_settle_performed": false,
+    "settled": true
+  }
+}

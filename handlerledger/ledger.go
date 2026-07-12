@@ -70,10 +70,10 @@ type OutcomeInput struct {
 
 // MarkDoneInput is the argument to LedgerStore.MarkDone.
 type MarkDoneInput struct {
-	DedupKey       string
-	SourceHandler  string
-	SourceEventID  string
-	SideEffectID   string
+	DedupKey      string
+	SourceHandler string
+	SourceEventID string
+	SideEffectID  string
 }
 
 // QueryOptions narrows query results.
@@ -96,6 +96,19 @@ type LedgerStore interface {
 	QueryByStatus(ctx context.Context, status LedgerStatus, opt QueryOptions) ([]*LedgerRow, error)
 	DeleteUser(ctx context.Context, userID string) (int, error)
 }
+
+// Backended is implemented by every LedgerStore to report its actual
+// backend name ("memory" | "redis" | "ddb"). Callers use it instead of
+// guessing from the concrete type — so a degraded store reports the truth
+// (finding QG-02).
+type Backended interface {
+	Backend() string
+}
+
+// Backend implementations — the store names the backend it actually is.
+func (s *InMemoryLedgerStore) Backend() string { return "memory" }
+func (s *redisLedgerStore) Backend() string    { return "redis" }
+func (s *ddbLedgerStore) Backend() string      { return "ddb" }
 
 // HashKey returns a stable sha256 hex of the dedup key.
 func HashKey(s string) string {

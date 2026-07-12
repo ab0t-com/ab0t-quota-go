@@ -3,7 +3,9 @@ package counters
 // Gauge is a current-level counter (e.g. concurrent sandboxes per org).
 // No TTL — gauges are managed via explicit increment/decrement.
 //
-// Wire-level: matches Python's `quota:gauge:{resource}:{scope}`.
+// Wire-level: the Python parity key is `quota:{org}:{rk}:gauge` — built by
+// OrgKey/UserKey in keys_python.go, which the engine uses. Key() below is
+// the DEPRECATED pre-P5.3 shape (finding QG-03).
 type Gauge struct {
 	Store       FloatStore
 	Prefix      KeyPrefix
@@ -11,6 +13,9 @@ type Gauge struct {
 }
 
 // Key returns the gauge's key for the scope.
+//
+// Deprecated: produces the non-parity shape quota:gauge:{rk}:{scope}
+// (finding QG-03). Use OrgKey/UserKey (keys_python.go). Retained until D-13.
 func (g Gauge) Key(scope string) string {
 	return g.Prefix.Build("gauge", g.ResourceKey, scope)
 }

@@ -47,8 +47,10 @@ func NewRedisPinStore(_ any) PinStore { return NewMemoryPinStore() }
 // in-memory; v0.2 wires real DDB.
 //
 // Future schema:
-//   PK: USER#{user_id}
-//   SK: BILLING_ORG
-//   attrs: org_id, set_at, source ("auto" | "operator")
+//
+//	PK: USER#{user_id}
+//	SK: BILLING_ORG
+//	attrs: org_id, set_at, source ("auto" | "operator")
+//
 // Conditional write on Set: auto never overwrites operator.
 func NewDDBPinStore(_ any, _ string) PinStore { return NewMemoryPinStore() }

@@ -40,5 +40,5 @@ type PinStore interface {
 // Used when no real store is available.
 type NoopPinStore struct{}
 
-func (NoopPinStore) Get(string) (string, error)            { return "", nil }
-func (NoopPinStore) Set(string, string, string) error      { return nil }
+func (NoopPinStore) Get(string) (string, error)       { return "", nil }
+func (NoopPinStore) Set(string, string, string) error { return nil }

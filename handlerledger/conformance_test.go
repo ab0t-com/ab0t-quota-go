@@ -66,7 +66,7 @@ func failedPermanentPath(t *testing.T, store LedgerStore) {
 	ev := fakeEvent{id: "e-fail", t: "org.created", uid: "u1"}
 	h := Idempotent(IdempotentConfig{
 		Handler: "h",
-		Retry: &RetryConfig{Attempts: 2, Backoff: BackoffConstant, Initial: time.Millisecond, Max: time.Millisecond},
+		Retry:   &RetryConfig{Attempts: 2, Backoff: BackoffConstant, Initial: time.Millisecond, Max: time.Millisecond},
 	},
 		func(ctx context.Context, e Event, hctx *Context) error { return errors.New("boom") })
 	_ = Dispatch(context.Background(), h, ev, store)
