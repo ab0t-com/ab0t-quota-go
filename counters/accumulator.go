@@ -33,12 +33,14 @@ type Accumulator struct {
 	Prefix      KeyPrefix
 	ResourceKey string
 	Reset       config.ResetPeriod
+	// Keyspace (K-8): zero value = legacy v1 path, byte-identical.
+	Keyspace Keyspace
 }
 
 // PeriodKey returns the key for the current period bucket.
 func (a Accumulator) PeriodKey(scope string, now time.Time) string {
 	period := CurrentPeriod(a.Reset, now)
-	return a.Prefix.Build("accumulator", a.ResourceKey, scope, period)
+	return DeprecatedScopeKey(a.Prefix, "accumulator", a.ResourceKey, scope, period)
 }
 
 // Add adds delta to the current period bucket and returns the new value.

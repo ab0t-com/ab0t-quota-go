@@ -17,6 +17,10 @@ func ptrFloat(f float64) *float64 { return &f }
 
 func minimalConfig() *config.Config {
 	return &config.Config{
+		// T-G1 (pre-authorised fixture edit, harness design §6.2 #1): the
+		// counter store must be DECLARED — explicit in-memory replaces the
+		// old silent empty-string default (GO-01 / D-5(b)).
+		Storage:     config.StorageConfig{RedisURL: config.Declare("memory://")},
 		Enforcement: config.EnforcementConfig{Enabled: true},
 		TierProvider: config.TierProviderConfig{
 			Type:    "static",

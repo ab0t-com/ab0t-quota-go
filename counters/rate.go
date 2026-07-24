@@ -20,6 +20,8 @@ type Rate struct {
 	Prefix      KeyPrefix
 	ResourceKey string
 	Window      time.Duration
+	// Keyspace (K-8): zero value = legacy v1 path, byte-identical.
+	Keyspace Keyspace
 }
 
 // RateStore is a small interface for sliding-window ops. Backed by Redis
@@ -35,7 +37,7 @@ type RateStore interface {
 
 // Key returns the rate counter's key.
 func (r Rate) Key(scope string) string {
-	return r.Prefix.Build("rate", r.ResourceKey, scope)
+	return DeprecatedScopeKey(r.Prefix, "rate", r.ResourceKey, scope)
 }
 
 // Record adds one event to the window.

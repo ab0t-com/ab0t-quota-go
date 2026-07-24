@@ -31,6 +31,11 @@ type AcquireSpec struct {
 	Delta     float64
 	OrgLimit  *float64 // nil = unlimited
 	UserLimit *float64 // nil = unlimited (or no per-user limit)
+	// Secondary-shape twins (K-8) — set only during keyspace dual-write and
+	// consumed only by DualAtomicAcquire; zero values change nothing.
+	OrgKey2  string
+	UserKey2 string
+	SeqKey2  string
 }
 
 // AcquireOutcome is the result of an atomic acquire.

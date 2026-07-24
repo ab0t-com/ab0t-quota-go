@@ -195,14 +195,24 @@ func (r *Reconciler) ReconcileOrg(ctx context.Context, orgID string) ([]DriftAle
 			target, source = float64(openN), "activations"
 		}
 
-		g := counters.Gauge{Prefix: r.Factory.Prefix, ResourceKey: rk}
-		cur, _, _ := r.Factory.Floats.GetFloat(ctx, g.OrgKey(orgID))
+		// K-8: derive keys through the FACTORY so the reconciler reads/writes
+		// the engine's declared keyspace (a v2-blind reconciler "heals" the
+		// shape nobody reads, spec §6.3). Dual: read with fallback, force-set
+		// BOTH shapes (Python gauge.reset parity).
+		g := r.Factory.Gauge(rk)
+		pair := g.OrgKeyPair(orgID)
+		cur, _, _ := counters.GetFloatDual(ctx, r.Factory.Floats, pair)
 		if cur == target && unsettleable == 0 {
 			continue // no drift, nothing to alert
 		}
 		// Force-set the cache to the authoritative level; log which source won.
-		if err := r.Factory.Floats.Set(ctx, g.OrgKey(orgID), target, 0); err != nil {
+		if err := r.Factory.Floats.Set(ctx, pair.P, target, 0); err != nil {
 			return alerts, err
+		}
+		if pair.S != "" {
+			if err := r.Factory.Floats.Set(ctx, pair.S, target, 0); err != nil {
+				return alerts, err
+			}
 		}
 		slog.Info("reconciled_gauge", "org", orgID, "resource", rk, "was", cur, "converged_to", target, "source", source)
 		alerts = append(alerts, r.emit(DriftAlert{

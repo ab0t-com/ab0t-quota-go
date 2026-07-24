@@ -181,6 +181,13 @@ quotactl backfill --handler grant_initial_credit --user-ids u1,u2,u3 --org-id <e
 
 # GDPR cascade
 quotactl delete-user --user-id u123 --confirm
+
+# Emit conforming infra artifacts (never creates cloud resources)
+quotactl provision --emit compose      # or terraform | acl | iam
+quotactl provision --local             # one verified local dev Redis
+
+# Grade production posture before go-live (runs full Setup — stated in output)
+quotactl doctor --config quota-config.json --json
 ```
 
 ## Per-feature env-var matrix

@@ -4,7 +4,10 @@ package config
 
 // StorageConfig holds Redis + DDB knobs.
 type StorageConfig struct {
-	RedisURL       string `json:"redis_url,omitempty"`
+	// RedisURL is Declared[string] (GO-01): JSON null, an absent key, and a
+	// set value are three distinguishable states. Undeclared ⇒ startup error;
+	// in-memory only via the explicit declaration "memory://" (D-5(b)).
+	RedisURL       Declared[string] `json:"redis_url,omitempty"`
 	RedisKeyPrefix string `json:"redis_key_prefix,omitempty"`
 	RedisPassword  string `json:"redis_password,omitempty"`
 	// RedisClusterConfirmedDisabled is the operator's ON-THE-RECORD assertion that
@@ -27,10 +30,23 @@ type StorageConfig struct {
 	// the one thing only real AWS can confirm). Without it, an unverified backup posture on a
 	// money store REFUSES to start (D-76). Env: AB0T_QUOTA_DDB_PITR_CONFIRMED=true.
 	DDBPITRConfirmed               bool   `json:"ddb_pitr_confirmed,omitempty"`
+	// ConnectRetrySeconds is the D-2 lever: on a DECLARED but UNREACHABLE
+	// Redis, boot retries the unreachable kind for up to this many seconds
+	// (default 30; 0 = fail immediately), then refuses with a typed
+	// reachability error. Auth failures never retry. Never in-memory.
+	ConnectRetrySeconds            *float64 `json:"connect_retry_seconds,omitempty"`
 	DynamoDBTable                  string `json:"dynamodb_table,omitempty"`
 	DynamoDBRegion                 string `json:"dynamodb_region,omitempty"`
 	PersistenceEnabled             *bool  `json:"persistence_enabled,omitempty"`
 	PersistenceSyncIntervalSeconds int    `json:"persistence_sync_interval_seconds,omitempty"`
+	// KeyspaceVersion (K-1, keyspace spec §3.1): the READ-authoritative counter
+	// key shape — 0/absent or 1 = v1 (today), 2 = v2 quota:v2:{svc/org}:….
+	// Requires service_name. Validated in Config.Validate (ST-KEYSPACE-1).
+	KeyspaceVersion int `json:"keyspace_version,omitempty"`
+	// KeyspaceDualWrite maintains BOTH shapes during migration. The Go
+	// dual-write path is NOT yet implemented, so Validate refuses true —
+	// a consumer must never believe they are dual-writing when nothing is.
+	KeyspaceDualWrite bool `json:"keyspace_dual_write,omitempty"`
 }
 
 // EnforcementConfig governs runtime enforcement behavior.

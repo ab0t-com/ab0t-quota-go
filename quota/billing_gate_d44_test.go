@@ -25,7 +25,7 @@ func durableRedisCfg(t *testing.T) *config.Config {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	c := paidCfg()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + mr.Addr()}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + mr.Addr())}
 	c.Outbox = config.OutboxConfig{Store: "redis", RedisDurabilityConfirmed: true}
 	return c
 }

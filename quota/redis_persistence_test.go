@@ -38,7 +38,7 @@ func TestConfiguredRedisBackend_PersistsAcrossRestart_QG01(t *testing.T) {
 
 	mkConfig := func() *config.Config {
 		cfg := minimalConfig()
-		cfg.Storage = config.StorageConfig{RedisURL: redisURL}
+		cfg.Storage = config.StorageConfig{RedisURL: config.Declare(redisURL)}
 		return cfg
 	}
 	ctx := context.Background()

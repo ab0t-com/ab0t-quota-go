@@ -19,7 +19,7 @@ v0.5.2 — same file works for both runtimes.
     "default_tier": "free"
   },
   "storage": {
-    "redis_key_prefix": "ab0t-quota"
+    "redis_url": "memory://"
   },
   "enforcement": {
     "enabled": true
@@ -201,20 +201,40 @@ Python + Go.
 `shadow_mode` is honored by the Go port (Python lib ignores it — known
 upstream bug).
 
-## storage — key namespace + (future) Redis URL
+## storage — the declared counter store
 
 ```json
 "storage": {
-  "redis_key_prefix": "ab0t-quota",   // every key prefixed with this
-  "redis_url": "redis://localhost:6379/0",
+  "redis_key_prefix": "quota",        // only "quota" is accepted (cross-runtime keyspace parity, D-17) — any other value refuses at startup
+  "redis_url": "redis://your-redis-host:6379/0",   // YOUR endpoint, declared — or "memory://" for single-process dev
   "dynamodb_table": "ab0t-quota-ledger",
   "dynamodb_region": "us-east-1"
 }
 ```
 
-v0.1.0 ships in-memory backends only; `redis_url` / `dynamodb_table`
-trigger a "v0.2 wires this" warning at Setup. Set them now so the
-upgrade is a one-line change.
+`redis_url` is WIRED and REQUIRED: Setup connects to it, verifies its
+topology/eviction/scripting, and REFUSES to start when it is absent or
+null (QUOTA-CFG-001 names `storage.redis_url` + `QUOTA_REDIS_URL`).
+There is no silent fallback. For single-process dev, declare in-memory
+explicitly — `"redis_url": "memory://"` — and capabilities will report
+`float_store=memory`, `redis_topology=n/a (no redis counter store)`.
+`dynamodb_table` wires the durable handler ledger when set.
+
+Further `storage` keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `redis_password` | — | credential; a declared field beats a URL-embedded one (D-5(a); differing both logs a WARNING naming the winner) |
+| `connect_retry_seconds` | `30` | D-2: a DECLARED but unreachable Redis is retried for up to this many seconds at boot, then REFUSED with a typed reachability error (`0` = fail immediately). Auth failures never retry. It never silently degrades to in-memory |
+| `redis_cluster_confirmed_disabled` | `false` | operator assertion for an unprobeable topology (D-71); never overrides an observed `cluster_enabled:1` |
+| `redis_durability_confirmed` | `false` | operator assertion for unreadable `CONFIG` (D-72); never overrides an observed `allkeys-*` |
+| `ddb_pitr_confirmed` | `false` | operator assertion where the control plane cannot report PITR (D-76) |
+| `keyspace_version` | absent = `1` | counter key shape. **v1 is today's keys — an existing consumer changing nothing is unaffected.** `2` (service-scoped v2 shape) requires `service_name` and is currently REFUSED by `config.Validate`: the Go dual/v2 engine path is not wired yet, and declaring a shape nothing writes would be a lie. Stay `(1, false)` until the Go dual path lands |
+| `keyspace_dual_write` | `false` | maintain both shapes during a v1→v2 migration — same refusal status as `keyspace_version: 2` |
+
+Startup refusal codes are one registry shared byte-identically with the
+Python runtime (`conformance/quota-cfg-registry.json`); the Python repo's
+`docs/error-codes.md` documents every code with its remedy.
 
 ## alerts — threshold notifications
 
@@ -240,10 +260,15 @@ substituted — safety.
 
 ```json
 "storage": {
-  "redis_url": "${QUOTA_REDIS_URL:-redis://localhost:6379/0}",
+  "redis_url": "${QUOTA_REDIS_URL}",
   "redis_password": "${QUOTA_REDIS_PASSWORD}"
 }
 ```
+
+Never put an infrastructure endpoint in the `:-default` position — a
+default in your config file is an endpoint you did not declare. With
+`QUOTA_REDIS_URL` unset the value resolves empty and Setup refuses with
+QUOTA-CFG-001, which is the correct outcome for an undeclared store.
 
 ## Forward compat
 

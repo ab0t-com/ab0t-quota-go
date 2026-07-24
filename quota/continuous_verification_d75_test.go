@@ -141,6 +141,8 @@ func TestRevalidator_DegradesHealth_AndAlerts_WithoutCrashing_D75(t *testing.T) 
 	q := &Quota{capability: Capabilities{
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
 		FloatStore: "redis", RedisTopology: TopologySingleNode,
+		// T-13 fixture: the new D-2/GO-10 reachability guard requires the affirmative value.
+		RedisReachable: redisguard.RedisReachableOK,
 		CounterEvictionPolicy: "noeviction", RedisScripting: "on (EVAL verified)",
 		CounterEvictionsObserved: "0 (no keys evicted on this server)",
 		PreflightReverification:  "on (rides the reconciler loop)",
@@ -220,10 +222,10 @@ func TestRealLiveConfigFlip_IsCaughtByTheRunningProcess_D75(t *testing.T) {
 	}
 
 	cfg := minimalConfig()
-	cfg.Storage = config.StorageConfig{RedisURL: "redis://" + addr}
+	cfg.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + addr)}
 	q := &Quota{capability: Capabilities{
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
-		FloatStore: "redis", PreflightReverification: "on (rides the reconciler loop)",
+		FloatStore: "redis", RedisReachable: redisguard.RedisReachableOK, PreflightReverification: "on (rides the reconciler loop)",
 	}}
 	revalidate := q.makeRevalidator(client, cfg)
 
@@ -394,7 +396,7 @@ func TestEvictionFacts_MarkTheCounterUntrusted_AndDegradeHealth_D80(t *testing.T
 	p := &evictedProbe{mutableProbe: mutableProbe{policy: "noeviction"}, evicted: 7}
 	q := &Quota{capability: Capabilities{
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
-		FloatStore: "redis", PreflightReverification: "on (rides the reconciler loop)",
+		FloatStore: "redis", RedisReachable: redisguard.RedisReachableOK, PreflightReverification: "on (rides the reconciler loop)",
 	}}
 	q.makeRevalidator(p, minimalConfig())(ctx)
 
@@ -420,7 +422,7 @@ func TestPreflightReverification_IsRequiredWhenTheCounterIsOnRedis_D79(t *testin
 	mr := miniredis.RunT(t)
 	c := minimalConfig()
 	c.Storage = config.StorageConfig{
-		RedisURL: "redis://" + mr.Addr(), RedisClusterConfirmedDisabled: true,
+		RedisURL: config.Declare("redis://" + mr.Addr()), RedisClusterConfirmedDisabled: true,
 		RedisDurabilityConfirmed: true,
 	}
 	q, err := Setup(context.Background(), Options{ConfigOverride: c}) // no ReconcileOrgs

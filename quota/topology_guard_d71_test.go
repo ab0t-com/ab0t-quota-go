@@ -176,7 +176,7 @@ func TestSetup_RefusesUnverifiableTopology_WithoutOperatorAssertion_D71(t *testi
 	t.Setenv(ClusterConfirmEnv, "")
 	mr := miniredis.RunT(t)
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + mr.Addr()}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + mr.Addr())}
 
 	_, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err == nil {
@@ -192,7 +192,7 @@ func TestSetup_OperatorAssertion_AllowsStart_AndIsOnTheRecord_D71(t *testing.T) 
 	t.Setenv(ClusterConfirmEnv, "")
 	mr := miniredis.RunT(t)
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + mr.Addr(), RedisClusterConfirmedDisabled: true}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + mr.Addr()), RedisClusterConfirmedDisabled: true}
 
 	q, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err != nil {
@@ -307,7 +307,7 @@ func TestRealClusteredRedis_IsRefused_D71(t *testing.T) {
 	}
 	t.Setenv(ClusterConfirmEnv, "")
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + addr}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + addr)}
 
 	_, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err == nil {
@@ -328,7 +328,7 @@ func TestRealSingleNodeRedis_IsAccepted_D71(t *testing.T) {
 	// only `INFO cluster` gets this right.)
 	t.Setenv(ClusterConfirmEnv, "")
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + addr}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + addr)}
 
 	q, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err != nil {

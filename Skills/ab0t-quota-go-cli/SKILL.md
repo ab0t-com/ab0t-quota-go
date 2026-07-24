@@ -1,11 +1,11 @@
 ---
 name: ab0t-quota-go-cli
-description: Operate a deployed ab0t-quota-go service via the `quotactl` admin CLI. Use when registering a webhook subscription with auth, replaying missed events, backfilling credit grants for legacy users, querying the handler ledger, deleting a user's records for GDPR, printing the live Capabilities snapshot, installing the binary via `go install` or GitHub releases, debugging "no events firing" / "credits not granted" / "handler running twice", or scripting any admin task that the library exposes.
+description: Operate a deployed ab0t-quota-go service via the `quotactl` admin CLI. Use when emitting conforming infrastructure artifacts (`provision --emit compose|terraform|acl|iam`), starting a verified local dev Redis (`provision --local`), grading production posture before go-live (`doctor`), registering a webhook subscription with auth, replaying missed events, backfilling credit grants for legacy users, querying the handler ledger, deleting a user's records for GDPR, printing the live Capabilities snapshot, installing the binary via `go install` or GitHub releases, debugging "no events firing" / "credits not granted" / "handler running twice", or scripting any admin task that the library exposes.
 ---
 
 # quotactl — ab0t-quota-go Admin CLI
 
-Six subcommands. Each takes `--help` for full flags.
+Eight subcommands. Each takes `--help` for full flags.
 
 ## Install
 
@@ -119,6 +119,41 @@ quotactl capabilities | jq '.Billing, .CreditGrant, .AlertsWebhook'
 
 If any expected-on capability is `false`, check `.WhyOff` for the reason
 string.
+
+### provision — conforming infrastructure, emitted not transcribed
+
+```bash
+quotactl provision --emit compose      # dev-stack fragment
+quotactl provision --emit terraform    # the DDB tables + IAM policy
+quotactl provision --emit acl          # least-privilege Redis ACL
+quotactl provision --emit iam --include-create   # only with auto-create opted in
+quotactl provision --local [--port N] [--name NAME] [--dry-run]
+```
+
+Artifacts are generated from the same registry the boot gates enforce, so
+artifact and gate cannot drift. `provision` NEVER creates cloud resources —
+emit-and-let-them-apply. `--local` starts one local Docker Redis and verifies
+it with the boot evaluator (its only side effect). Same verb names, exit
+taxonomy and JSON schema as the Python CLI (conformance `ST-CLI-1`); the
+verb is `provision`, not `setup` — `quota.Setup` is the library's own entry
+point.
+
+### doctor — production-posture grading (humans + auditors)
+
+```bash
+quotactl doctor --config quota-config.json [--json] [--fail-on-risk] [--timeout SEC]
+```
+
+Grades what "bootable" lets through: persistence behind a durability
+assertion, PITR asserted-not-observed, already-evicted keys, ACL breadth,
+encryption. Reports what it could not check as `not_checked` with the
+reason. Exit mirrors the shared taxonomy (0 ok / 1 gate / 2 config /
+3 unreachable / 4 internal); `--fail-on-risk` turns RISK findings into
+exit 1; `--json` extends the preflight report schema with a posture section.
+**Honest side-effect statement (also in the command's own output): Go's
+`doctor` runs full `quota.Setup` — it may create the library's declared
+tables and loads the counter script. It never claims read-only** (the Python
+doctor's only server-visible write is the disclosed `SCRIPT LOAD`).
 
 ## Common workflows
 

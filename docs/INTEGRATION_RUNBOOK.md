@@ -63,7 +63,11 @@ mature 4-tier hybrid model with all the moving parts in place.
 
 Drop this file in your service's repo root. It's the source of truth.
 
-Minimal viable shape:
+Minimal viable shape. Note `storage.redis_url` is REQUIRED — an
+undeclared counter store is a startup error (QUOTA-CFG-001), never a
+silent in-memory fallback. `${QUOTA_REDIS_URL}` declares it from your
+deploy env (Stage 6); the key prefix is fixed at `"quota"` (cross-runtime
+keyspace parity) and is omitted here because no other value boots.
 
 ```json
 {
@@ -74,7 +78,7 @@ Minimal viable shape:
     "cache_ttl_seconds": 60
   },
   "storage": {
-    "redis_key_prefix": "ab0t-quota-gateway"
+    "redis_url": "${QUOTA_REDIS_URL}"
   },
   "enforcement": {
     "enabled": true,
@@ -149,15 +153,20 @@ Minimal viable shape:
 Note `enforcement.shadow_mode: true` — that's deliberate. We turn it
 off in Stage 8 after we've watched the dashboards.
 
-**Verify Stage 2:**
+**Verify Stage 2** — at your desk, before any Redis exists, declare the
+explicit single-process dev store for the check:
 
 ```bash
-quotactl capabilities --config quota-config.json
+QUOTA_REDIS_URL=memory:// quotactl capabilities --config quota-config.json
 ```
 
-You should see `"Enforcement": true, "ShadowMode": true` and the tier
-list. If validation errors appear, fix them now — they get harder to
-debug after Setup runs in a hot reload.
+You should see `"Enforcement": true, "ShadowMode": true`, the tier list,
+and `"FloatStore": "memory"` with
+`"RedisTopology": "n/a (no redis counter store)"`. In your real
+deployment `QUOTA_REDIS_URL` points at your Redis (Stage 6) — never ship
+`memory://` to multi-replica production: each replica would admit the
+full limit independently. If validation errors appear, fix them now —
+they get harder to debug after Setup runs in a hot reload.
 
 See [testing skill § Phase 1](
 ../Skills/ab0t-quota-go-testing/SKILL.md#phase-1--verify-it-loaded-at-all)
@@ -380,6 +389,7 @@ whatever):
 
 | Var | Value | Where to get it |
 |-----|-------|-----------------|
+| `QUOTA_REDIS_URL` | your Redis endpoint (single-node, non-evicting) | your infra — the counter store Stage 2 declares; REQUIRED or boot refuses (QUOTA-CFG-001) |
 | `AB0T_QUOTA_BILLING_URL` | `https://billing.service.ab0t.com` | known |
 | `AB0T_QUOTA_PAYMENT_URL` | `https://payment.service.ab0t.com` | known |
 | `AB0T_QUOTA_SERVICE_TOKEN` | bearer token | ab0t-mesh registration |

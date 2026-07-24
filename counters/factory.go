@@ -14,6 +14,9 @@ type Factory struct {
 	Floats FloatStore
 	Rates  RateStore
 	Prefix KeyPrefix
+	// Keyspace (K-8, keyspace spec §3.2): the declared key-shape state. The
+	// zero value keeps every builder on the legacy v1 path, byte-identical.
+	Keyspace Keyspace
 }
 
 // NewMemoryFactory returns a Factory backed by in-memory stores. Test
@@ -51,13 +54,13 @@ func (f *Factory) Counter(resourceKey string) Counter {
 
 // Gauge returns a Gauge for resource.
 func (f *Factory) Gauge(resourceKey string) Gauge {
-	return Gauge{Store: f.Floats, Prefix: f.Prefix, ResourceKey: resourceKey}
+	return Gauge{Store: f.Floats, Prefix: f.Prefix, ResourceKey: resourceKey, Keyspace: f.Keyspace}
 }
 
 // Accumulator returns an Accumulator for resource. reset must be a valid
 // ResetPeriod from the resource def.
 func (f *Factory) Accumulator(resourceKey string, reset config.ResetPeriod) Accumulator {
-	return Accumulator{Store: f.Floats, Prefix: f.Prefix, ResourceKey: resourceKey, Reset: reset}
+	return Accumulator{Store: f.Floats, Prefix: f.Prefix, ResourceKey: resourceKey, Reset: reset, Keyspace: f.Keyspace}
 }
 
 // Rate returns a Rate for resource.
@@ -67,6 +70,7 @@ func (f *Factory) Rate(r config.ResourceDef) Rate {
 		Prefix:      f.Prefix,
 		ResourceKey: r.ResourceKey,
 		Window:      time.Duration(r.WindowSeconds) * time.Second,
+		Keyspace:    f.Keyspace,
 	}
 }
 

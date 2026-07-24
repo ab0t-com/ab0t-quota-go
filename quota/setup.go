@@ -96,6 +96,14 @@ type Options struct {
 	// ReconcileOrgs supplies the orgs to reconcile each pass (the library can't
 	// enumerate them). nil ⇒ the reconciler is NOT started (Capabilities says why).
 	ReconcileOrgs func() []string
+
+	// SkipBackgroundLoops suppresses the ONGOING side-effect loops — the
+	// billing heartbeat POSTs and the outbox drain loop (which publishes and
+	// SETTLES money events) — for smoke/diagnostic runs. `quotactl
+	// capabilities` sets it (D-8): a pre-deploy check must not move money.
+	// One-shot verification I/O (redis preflight incl. SCRIPT LOAD, DDB
+	// table ensure/verify) still runs — it is the thing being verified.
+	SkipBackgroundLoops bool
 }
 
 // Quota is the configured runtime handle.
@@ -184,7 +192,35 @@ type Capabilities struct {
 	// "unbounded (...)" | "unknown". `noeviction` fails CLOSED at the cliff (safe) but the
 	// service DIES — so the cliff must be visible BEFORE 3am. Degrades on a READ low-headroom.
 	MemoryHeadroom string
+	// RedisReachable is the D-2/GT-T1 boot verdict on the DECLARED store:
+	// "on (PING verified)" | "PROBE FAILED (…) [kind: detail]" |
+	// "n/a (no redis counter store)". Published so the cause is readable and
+	// health-checked (GO-10: a verdict nobody reads is not a verdict).
+	RedisReachable string
+	// Keyspace (K-8) is the ACTIVE counter key shape + migration phase, e.g.
+	// "v1", "v1+dual(phase=dual)", "v2(phase=reaped)" — so an operator can
+	// see which shape a live process reads/writes (keyspace spec §3).
+	Keyspace string
 	WhyOff         map[string]string
+	// Resolved is the dependency-resolution provenance (T-G5, design §6.2 —
+	// ENV-11's Go twin): WHERE each dependency's effective value came from,
+	// so `quotactl capabilities` shows the resolved plan. Secret values never
+	// appear (§6.3): URLs are userinfo-redacted, secrets are presence-only.
+	Resolved map[string]ResolvedEntry
+}
+
+// ResolvedEntry is one row of the resolved dependency plan.
+type ResolvedEntry struct {
+	Value  string `json:"value"`  // redacted where secret-bearing
+	Source string `json:"source"` // e.g. "config storage.redis_url" | "env QUOTA_REDIS_URL" | "unset"
+}
+
+// presenceEntry reports a secret dependency without its value (§6.3).
+func presenceEntry(set bool, source string) ResolvedEntry {
+	if set {
+		return ResolvedEntry{Value: "present (value never shown)", Source: source}
+	}
+	return ResolvedEntry{Value: "not present", Source: "unset"}
 }
 
 // Setup constructs a Quota.
@@ -205,7 +241,29 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		return nil, fmt.Errorf("quota.Setup: validate config: %w", err)
 	}
 
-	cap := Capabilities{Engine: true, WhyOff: map[string]string{}}
+	cap := Capabilities{Engine: true, WhyOff: map[string]string{}, Resolved: map[string]ResolvedEntry{}}
+
+	// K-8 (keyspace spec §3.2): the declared keyspace state — config.Validate
+	// has already guarded values; NewKeyspace re-guards the charset/states.
+	keyspace, ksErr := counters.NewKeyspace(cfg.ServiceName,
+		cfg.Storage.KeyspaceVersion, cfg.Storage.KeyspaceDualWrite)
+	if ksErr != nil {
+		if cfg.Storage.KeyspaceVersion == 2 || cfg.Storage.KeyspaceDualWrite {
+			return nil, fmt.Errorf("quota.Setup: keyspace declaration: %w", ksErr)
+		}
+		// v1 keys carry no scope: an odd service_name must not break a
+		// drop-in upgrade. Loud; the marker boot-guard runs unscoped.
+		slog.Warn("service_name cannot be a keyspace scope (charset guard) — keeping the "+
+			"unscoped v1 keyspace; fix it before any v2 migration", "err", ksErr)
+		keyspace = counters.Keyspace{}
+	}
+	cap.Keyspace = fmt.Sprintf("v%d", cfg.Storage.KeyspaceVersion)
+	if cfg.Storage.KeyspaceVersion == 0 {
+		cap.Keyspace = "v1"
+	}
+	if keyspace.DualWrite {
+		cap.Keyspace += "+dual"
+	}
 
 	prov, err := providers.New(cfg.TierProvider)
 	if err != nil {
@@ -242,17 +300,67 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 				"parity (finding QG-07/D-17). Unset it or set it to \"quota\"", prefixStr)
 	}
 	prefix := counters.KeyPrefix(prefixStr)
-	if cfg.Storage.RedisURL != "" {
-		client, rerr := newRedisClient(ctx, cfg.Storage)
+	// GO-01 (P0, pack 20260721) — the counter store must be DECLARED. An
+	// absent/null redis_url was silently read as "use in-memory counters":
+	// every replica admitted the full limit independently and a restart
+	// zeroed usage. Undeclared ⇒ typed startup error (QUOTA-CFG-001);
+	// in-memory survives ONLY as the explicit "memory://" declaration (D-5(b)).
+	storeRes, cfgErr := config.ResolveString(cfg.Storage.RedisURL, config.Spec{
+		Name:        "Redis counter store URL",
+		ConfigKey:   "storage.redis_url",
+		Env:         []string{"QUOTA_REDIS_URL"},
+		Requirement: config.Required,
+		Code:        "QUOTA-CFG-001",
+		Previously: "earlier versions silently fell back to an IN-MEMORY, PER-PROCESS counter: " +
+			"every replica admitted the full limit independently and a restart zeroed usage. " +
+			"This version refuses instead.",
+		Remedy: "set storage.redis_url (or QUOTA_REDIS_URL). For single-process dev, declare it " +
+			"explicitly: \"redis_url\": \"memory://\" — capabilities will report float_store=memory, " +
+			"redis_topology=n/a (no redis counter store)",
+		Docs: "CONSUMING.md#prerequisites · verify before deploy: quotactl capabilities --config quota-config.json",
+	})
+	if cfgErr != nil {
+		return nil, cfgErr
+	}
+	redisDeclared := storeRes.Value != "memory://"
+	slog.Info("counter store resolved", "source", storeRes.Source,
+		"url", config.RedactURL(storeRes.Value))
+	// T-G5 — the resolved plan with provenance (§6.2). Secrets: presence only.
+	cap.Resolved["redis_url"] = ResolvedEntry{Value: config.RedactURL(storeRes.Value), Source: storeRes.Source}
+	cap.Resolved["redis_password"] = presenceEntry(cfg.Storage.RedisPassword != "", "config storage.redis_password")
+	if cfg.Storage.DynamoDBTable != "" {
+		cap.Resolved["dynamodb_table"] = ResolvedEntry{Value: cfg.Storage.DynamoDBTable, Source: "config storage.dynamodb_table"}
+	} else {
+		cap.Resolved["dynamodb_table"] = ResolvedEntry{Value: "", Source: "unset"}
+	}
+	if cfg.Storage.DynamoDBRegion != "" {
+		cap.Resolved["dynamodb_region"] = ResolvedEntry{Value: cfg.Storage.DynamoDBRegion, Source: "config storage.dynamodb_region"}
+	} else {
+		cap.Resolved["dynamodb_region"] = ResolvedEntry{Value: "(resolved by the AWS SDK chain at client build; error if it resolves nothing)", Source: "aws-sdk default chain"}
+	}
+	if cfg.Outbox.SNSTopicARN != "" {
+		cap.Resolved["sns_topic_arn"] = ResolvedEntry{Value: cfg.Outbox.SNSTopicARN, Source: "config outbox.sns_topic_arn"}
+	} else {
+		cap.Resolved["sns_topic_arn"] = ResolvedEntry{Value: "", Source: "unset"}
+	}
+	if cfg.Outbox.SNSRegion != "" {
+		cap.Resolved["sns_region"] = ResolvedEntry{Value: cfg.Outbox.SNSRegion, Source: "config outbox.sns_region"}
+	} else {
+		cap.Resolved["sns_region"] = ResolvedEntry{Value: "(resolved by the AWS SDK chain at client build; error if it resolves nothing)", Source: "aws-sdk default chain"}
+	}
+	if redisDeclared {
+		// T-13 / D-2 / GO-10: a DECLARED but unreachable Redis retries the
+		// unreachable kind within storage.connect_retry_seconds, then REFUSES
+		// with a typed reachability error. It NEVER degrades to in-memory —
+		// the old degrade served per-process counters behind a GREEN health
+		// probe (information_go_availability_20260721.md). Runtime failure
+		// after boot stays loud-not-fatal (D-75), unchanged.
+		client, rerr := connectDeclaredRedis(ctx, storeRes.Value, cfg.Storage.RedisPassword,
+			storeRes.Source, cfg.Storage.ConnectRetrySeconds, &cap)
 		if rerr != nil {
-			cap.FloatStore = "memory"
-			cap.RedisTopology = TopologyNA
-			cap.WhyOff["redis_store"] = "redis configured but unavailable: " + rerr.Error()
-			slog.Warn("counters: redis configured but UNAVAILABLE — DEGRADED to in-memory. "+
-				"Counters are process-local; usage is lost on restart and each replica enforces its own limit.",
-				"redis_url", cfg.Storage.RedisURL, "err", rerr)
-			factory = counters.NewMemoryFactory(prefix)
-		} else {
+			return nil, rerr
+		}
+		{
 			// D-71 — machine-check the Redis TOPOLOGY before anything touches the
 			// counter. The counter's Lua scripts are multi-key and CROSSSLOT on a
 			// Redis Cluster (D-23, observed at a real cluster); our prod is
@@ -280,25 +388,44 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 				_ = client.Close()
 				return nil, err
 			}
+			// K-8 (spec §3.3): keyspace boot guards — QUOTA-CFG-011 (version
+			// regression against a completed migration) / QUOTA-CFG-012
+			// (brownfield v2 over live v1 keys). Typed refusals, fatal.
+			marker, kerr := counters.CheckBootKeyspace(ctx, client, keyspace)
+			if kerr != nil {
+				_ = client.Close()
+				slog.Error("KEYSPACE BOOT GUARD refused to start (K-8, spec §3.3)", "err", kerr)
+				return nil, fmt.Errorf("quota.Setup: %w", kerr)
+			}
+			phase := "none"
+			if marker != nil && marker.Phase != "" {
+				phase = marker.Phase
+			}
+			cap.Keyspace += "(phase=" + phase + ")"
+
 			redisClient = client
 			f, ferr := counters.NewRedisFactory(client, prefix)
 			if ferr != nil {
-				// Should not happen (client is non-nil), but stay honest.
-				cap.FloatStore = "memory"
-				cap.WhyOff["redis_store"] = "redis factory build failed: " + ferr.Error()
-				slog.Warn("counters: redis factory build failed — DEGRADED to in-memory", "err", ferr)
-				factory = counters.NewMemoryFactory(prefix)
-			} else {
-				cap.FloatStore = "redis"
-				factory = f
+				// Should not happen (client is non-nil) — and per D-2/GO-10 a
+				// declared store NEVER silently becomes in-memory: refuse.
+				_ = client.Close()
+				return nil, fmt.Errorf("quota.Setup: redis counter factory build failed for the "+
+					"DECLARED store (D-2: never a silent in-memory fallback): %w", ferr)
 			}
+			cap.FloatStore = "redis"
+			f.Keyspace = keyspace
+			factory = f
 		}
 	} else {
 		cap.FloatStore = "memory"
 		// D-71: no Redis counter store ⇒ no cluster to CROSSSLOT on. An affirmative
 		// "not applicable", never a silent absence (D-51).
 		cap.RedisTopology = TopologyNA
+		cap.RedisReachable = TopologyNA // affirmative n/a — no store to reach (D-51)
 		factory = counters.NewMemoryFactory(prefix)
+		factory.Keyspace = keyspace
+		slog.Info("counter store: EXPLICIT in-memory (\"memory://\", declared) — " +
+			"counters are process-local and reset on restart; a declaration, not a degradation")
 	}
 
 	q := &Quota{
@@ -329,6 +456,16 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	// Mesh-side clients (optional).
 	mu := mesh.Resolve()
 	if mu.Billing != "" {
+		cap.Resolved["billing_url"] = ResolvedEntry{Value: mu.Billing, Source: "env " + mesh.EnvBillingURL}
+	} else {
+		cap.Resolved["billing_url"] = ResolvedEntry{Value: "", Source: "unset"}
+	}
+	if mu.Payment != "" {
+		cap.Resolved["payment_url"] = ResolvedEntry{Value: mu.Payment, Source: "env " + mesh.EnvPaymentURL}
+	} else {
+		cap.Resolved["payment_url"] = ResolvedEntry{Value: "", Source: "unset"}
+	}
+	if mu.Billing != "" {
 		c, err := billing.New(mu)
 		if err == nil {
 			q.Billing = c
@@ -337,8 +474,12 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			// was called; Start() had no caller, so the loop never beat —
 			// dormant safety code that creates false confidence. It now runs
 			// while billing is wired; Close() stops it.
-			q.Heartbeat = &billing.HeartbeatLoop{Client: c, ServiceName: cfg.ServiceName, Version: "go"}
-			q.Heartbeat.Start(context.Background())
+			if opts.SkipBackgroundLoops {
+				slog.Info("billing heartbeat NOT started (SkipBackgroundLoops — smoke run)")
+			} else {
+				q.Heartbeat = &billing.HeartbeatLoop{Client: c, ServiceName: cfg.ServiceName, Version: "go"}
+				q.Heartbeat.Start(context.Background())
+			}
 		} else {
 			cap.WhyOff["billing"] = err.Error()
 		}
@@ -441,13 +582,14 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	if cap.LedgerBackend == "memory" {
 		if cfg.Storage.DynamoDBTable != "" {
 			cap.WhyOff["ledger_persistent"] = "ddb configured but unavailable; ledger degraded to in-memory (see ledger_ddb WhyOff)"
-		} else if cfg.Storage.RedisURL != "" {
+		} else if redisDeclared {
 			cap.WhyOff["ledger_persistent"] = "redis unavailable; ledger degraded to in-memory (see redis_store WhyOff)"
 		}
 	}
 	q.PinStore = authevents.NewMemoryPinStore()
 	cap.AuthEvents = true
 	secret := os.Getenv("AB0T_AUTH_WEBHOOK_SECRET")
+	cap.Resolved["auth_webhook_secret"] = presenceEntry(secret != "", "env AB0T_AUTH_WEBHOOK_SECRET")
 	q.webhookHandler = authevents.MakeRouter(authevents.ReceiverConfig{
 		Secret:      secret,
 		LedgerStore: q.LedgerStore,
@@ -512,7 +654,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	// Redis, a missing re-verification is a MISSING GUARANTEE and must fail Healthy(). It can
 	// no longer disappear quietly. NOTE the subtlety: a LIVE reconciler with no preflight
 	// wired onto it is NOT the guarantee — liveness of the carrier is not delivery of the cargo.
-	if cfg.Storage.RedisURL != "" && cap.FloatStore == "redis" {
+	if redisDeclared && cap.FloatStore == "redis" {
 		switch {
 		case q.Reconciler == nil:
 			cap.PreflightReverification = "OFF — no reconciler loop, so the Redis invariants " +
@@ -553,7 +695,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			slog.Error("settlement publisher: SNS configured but client build failed", "err", serr)
 		}
 	}
-	if err := q.gateBillingChain(ctx, cfg, redisClient, publisher, enablePaid, &cap); err != nil {
+	if err := q.gateBillingChain(ctx, cfg, redisClient, publisher, enablePaid, opts.SkipBackgroundLoops, &cap); err != nil {
 		return nil, err
 	}
 
@@ -568,7 +710,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 // never the guarantee, "usage reaches billing" is. Each link needs a POSITIVE
 // signal; absence is UNKNOWN and unknown FAILS CLOSED (D-51). Capabilities
 // names the WEAKEST link — never a cheerful ON because one component exists.
-func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisClient *redis.Client, publisher outbox.Publisher, enablePaid bool, cap *Capabilities) error {
+func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisClient *redis.Client, publisher outbox.Publisher, enablePaid, skipLoops bool, cap *Capabilities) error {
 	// Assess every link. ok=true is the required positive signal.
 	store, durable, detail := outbox.Store(nil), false, "none"
 	if cfg.Outbox.OutboxEnabled() {
@@ -631,6 +773,13 @@ func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisC
 				"reservation window will be SETTLED against billing, not voided")
 		}
 		q.Outbox = em
+		if skipLoops {
+			// D-8: a smoke run assesses the chain but must not DRAIN it —
+			// draining publishes and settles real money events.
+			cap.BillingStatus = "ON (chain complete: outbox=" + detail + "; drain loop OFF — smoke run)"
+			slog.Info("billing chain complete — drain loop NOT started (SkipBackgroundLoops)", "outbox", detail)
+			return nil
+		}
 		drainCtx, cancel := context.WithCancel(context.Background())
 		q.closeFns = append(q.closeFns, func() error { cancel(); return nil })
 		interval := time.Duration(cfg.Outbox.DrainIntervalSeconds) * time.Second
@@ -677,6 +826,7 @@ func (q *Quota) Healthy() (bool, map[string]string) {
 	reasons := map[string]string{
 		"billing":                    q.capability.BillingStatus,
 		"reconciler":                 q.capability.Reconciler,
+		"redis_reachable":            q.capability.RedisReachable,
 		"redis_topology":             q.capability.RedisTopology,
 		"counter_eviction_policy":    q.capability.CounterEvictionPolicy,
 		"redis_scripting":            q.capability.RedisScripting,
@@ -684,6 +834,7 @@ func (q *Quota) Healthy() (bool, map[string]string) {
 		"counter_evictions_observed": q.capability.CounterEvictionsObserved,
 		"preflight_reverification":   q.capability.PreflightReverification,
 		"redis_persist_status":       q.capability.RedisPersistStatus,
+		"keyspace":                   q.capability.Keyspace,
 	}
 	billingOK := strings.HasPrefix(q.capability.BillingStatus, "ON") || q.capability.BillingStatus == "OFF (paid disabled)"
 	reconcilerOK := q.capability.Reconciler == "ON" || q.capability.Reconciler == "OFF — not requested"
@@ -693,6 +844,11 @@ func (q *Quota) Healthy() (bool, map[string]string) {
 	// nothing reads is the defect this ticket met eight times. Absence ⇒ not healthy
 	// (D-49/D-51).
 	topologyOK := TopologyOK(q.capability.RedisTopology)
+	// D-2 / GO-10 — the reachability verdict must FEED a predicate: only the
+	// affirmative "on (PING verified)" (or the memory-mode n/a) is healthy.
+	// Absence is not a value; a probe-failed value never reads green.
+	reachableOK := q.capability.FloatStore != "redis" ||
+		strings.HasPrefix(q.capability.RedisReachable, "on")
 	// D-72/D-73 — an evicting (or unverified) counter store silently over-admits, and a
 	// Redis that cannot run our Lua cannot count at all. Setup refuses to start on either,
 	// so a live process should never show them; the probe judges them anyway, because a
@@ -712,7 +868,7 @@ func (q *Quota) Healthy() (bool, map[string]string) {
 		strings.HasPrefix(q.capability.PreflightReverification, "n/a")
 	// D-81 — a Redis that is FAILING to persist is not durable, however green `appendonly` reads.
 	persistOK := redisguard.PersistFactsOK(q.capability.RedisPersistStatus)
-	return billingOK && reconcilerOK && topologyOK && counterOK && scriptOK && memOK &&
+	return billingOK && reconcilerOK && reachableOK && topologyOK && counterOK && scriptOK && memOK &&
 		factsOK && reverifyOK && persistOK, reasons
 }
 
@@ -821,11 +977,14 @@ func resolveDurableOutbox(ctx context.Context, cfg *config.Config, redisClient *
 	return nil, false, "none"
 }
 
+// ddbSignalPresent decides whether the consumer DECLARED DynamoDB intent —
+// from config only (GO-08). AWS_ENDPOINT_URL is an SDK endpoint override,
+// never an intent signal: a LocalStack endpoint set for another service must
+// not change whether ab0t-quota believes DynamoDB is configured.
 func ddbSignalPresent(cfg *config.Config) bool {
 	return strings.ToLower(cfg.Outbox.Store) == "ddb" ||
 		cfg.Storage.DynamoDBTable != "" ||
-		cfg.Outbox.DDBTable != "" ||
-		os.Getenv("AWS_ENDPOINT_URL") != ""
+		cfg.Outbox.DDBTable != ""
 }
 
 // Capabilities returns the snapshot.
@@ -850,17 +1009,83 @@ func (q *Quota) Close(ctx context.Context) error {
 	return firstErr
 }
 
-// newRedisClient builds + pings a go-redis client from StorageConfig
-// (TASK P5.1). A ping failure returns an error so the caller degrades
-// loudly to in-memory rather than handing back a client that silently
-// fails every op. redis_password overrides any password in the URL.
-func newRedisClient(ctx context.Context, sc config.StorageConfig) (*redis.Client, error) {
-	opt, err := redis.ParseURL(sc.RedisURL)
+// connectDeclaredRedis — the D-2 boot gate (T-13; Python parity:
+// _gate_redis_reachable). One classified connect+PING per attempt; the retry
+// budget applies to the UNREACHABLE kind only (auth does not heal by
+// waiting); 0.5s→5s capped backoff; the verdict lands on Capabilities before
+// any refusal path returns.
+// The D-2 retry numbers are a CROSS-RUNTIME CONTRACT, declared in
+// ST-RESOLVE-1's retry_contract (conformance/scenarios.json) and bound by
+// TestSTResolve1_Clause7 — change them there first, or the binding goes RED
+// (T-27: agreement by having-diffed-the-other-runtime is PAR-01 rebuilt).
+const (
+	defaultConnectRetrySeconds = 30.0
+	connectBackoffInitial      = 500 * time.Millisecond
+	connectBackoffCap          = 5 * time.Second
+)
+
+func connectDeclaredRedis(ctx context.Context, url, password, source string,
+	retrySeconds *float64, cap *Capabilities) (*redis.Client, error) {
+	budget := defaultConnectRetrySeconds
+	if retrySeconds != nil {
+		budget = *retrySeconds
+		if budget < 0 {
+			budget = 0
+		}
+	}
+	deadline := time.Now().Add(time.Duration(budget * float64(time.Second)))
+	delay := connectBackoffInitial
+	for {
+		client, err := newRedisClient(ctx, url, password)
+		if err == nil {
+			cap.RedisReachable = redisguard.RedisReachableOK
+			slog.Info("redis reachability verified (D-2/GT-T1): PING ok", "source", source)
+			return client, nil
+		}
+		kind := redisguard.ClassifyRedisError(err)
+		if kind == "" {
+			kind = "error"
+		}
+		if kind == "unreachable" && time.Now().Add(delay).Before(deadline) {
+			slog.Warn("declared Redis unreachable — retrying within the D-2 budget",
+				"budget_seconds", budget, "err", err.Error())
+			select {
+			case <-ctx.Done():
+				// context gone: fall through to the refusal
+			case <-time.After(delay):
+				delay = min(delay*2, connectBackoffCap)
+				continue
+			}
+		}
+		cap.RedisReachable = TopologyProbeFailed + " [" + kind + ": " + err.Error() + "]"
+		rerr := redisguard.ReachabilityError(kind, err.Error(), config.RedactURL(url), source, budget)
+		slog.Error("DECLARED REDIS UNREACHABLE/UNAUTHENTICATED (D-2) — refusing to start",
+			"kind", kind, "err", err.Error())
+		return nil, rerr
+	}
+}
+
+// newRedisClient builds + pings a go-redis client from the RESOLVED store
+// URL (TASK P5.1 / GO-01: resolution happens once, in Setup). A ping failure
+// returns an error so the caller degrades loudly to in-memory rather than
+// handing back a client that silently fails every op. redis_password
+// overrides any password in the URL.
+func newRedisClient(ctx context.Context, redisURL, redisPassword string) (*redis.Client, error) {
+	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse redis_url: %w", err)
 	}
-	if sc.RedisPassword != "" {
-		opt.Password = sc.RedisPassword
+	if redisPassword != "" {
+		// D-5(a) / ST-RESOLVE-1 clause 5: the separately-declared field wins
+		// over URL userinfo. When both are set and DIFFER, warn naming the
+		// SOURCES (never the values) — that assembled pair is exactly the
+		// "credentials nobody intended" shape of ENV-02.
+		if opt.Password != "" && opt.Password != redisPassword {
+			slog.Warn("redis credentials: storage.redis_password and the URL-embedded password " +
+				"are BOTH set and differ — the declared field storage.redis_password wins over " +
+				"the URL userinfo (D-5(a)). Remove the stale one.")
+		}
+		opt.Password = redisPassword
 	}
 	client := redis.NewClient(opt)
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -872,18 +1097,53 @@ func newRedisClient(ctx context.Context, sc config.StorageConfig) (*redis.Client
 	return client, nil
 }
 
-// newDDBClient builds an aws-sdk DynamoDB client for the handler ledger
-// (TASK P5.1). Region from storage.dynamodb_region (default us-west-2);
-// AWS_ENDPOINT_URL overrides the endpoint (DynamoDB Local / LocalStack).
-// Credentials come from the default chain (env / instance role).
-func newDDBClient(ctx context.Context, sc config.StorageConfig) (*dynamodb.Client, error) {
-	region := sc.DynamoDBRegion
-	if region == "" {
-		region = "us-west-2"
+// resolveAWSRegion applies the GO-02 contract shared by every AWS client:
+// a DECLARED region wins; otherwise defer to the AWS SDK's own chain
+// (env/profile/IMDS — platform contract) and LOG what it resolved; a region
+// nobody resolves is a typed config error naming the config key and
+// AWS_REGION — never an invented default. (The two old defaults, us-west-2
+// and us-east-1, DISAGREED: which region a table landed in depended on which
+// code path provisioned it.)
+func resolveAWSRegion(ctx context.Context, declared, configKey, code string) (aws.Config, error) {
+	var loadOpts []func(*awsconfig.LoadOptions) error
+	if declared != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(declared))
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return aws.Config{}, fmt.Errorf("load aws config: %w", err)
+	}
+	if awsCfg.Region == "" {
+		return aws.Config{}, config.NewUndeclaredError(config.Spec{
+			Name:      "AWS region (" + configKey + ")",
+			ConfigKey: configKey,
+			Env:       []string{"AWS_REGION"},
+			Code:      code,
+			Previously: "earlier versions invented a region here (us-west-2 in the DynamoDB " +
+				"client, us-east-1 in the SNS client — they disagreed, so which region a table " +
+				"landed in depended on which code path provisioned it). This version refuses instead.",
+			Remedy: "set " + configKey + " in quota-config.json, or let the platform provide " +
+				"AWS_REGION (ECS/EKS/IRSA inject it; the AWS SDK resolves it by its own contract).",
+			Docs: "CONSUMING.md#prerequisites · verify before deploy: quotactl capabilities --config quota-config.json",
+		}, "key absent; the AWS SDK chain resolved no region")
+	}
+	source := "aws-sdk default chain"
+	if declared != "" {
+		source = "config " + configKey
+	}
+	slog.Info("aws region resolved", "region", awsCfg.Region, "for", configKey, "source", source)
+	return awsCfg, nil
+}
+
+// newDDBClient builds an aws-sdk DynamoDB client for the handler ledger
+// (TASK P5.1). Region per resolveAWSRegion (GO-02: declared, SDK-resolved,
+// or a typed error — never an invented default). AWS_ENDPOINT_URL overrides
+// the endpoint (DynamoDB Local / LocalStack — SDK contract, endpoint only,
+// never an intent signal). Credentials come from the default chain.
+func newDDBClient(ctx context.Context, sc config.StorageConfig) (*dynamodb.Client, error) {
+	awsCfg, err := resolveAWSRegion(ctx, sc.DynamoDBRegion, "storage.dynamodb_region", "QUOTA-CFG-009")
+	if err != nil {
+		return nil, err
 	}
 	var opts []func(*dynamodb.Options)
 	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
@@ -893,19 +1153,12 @@ func newDDBClient(ctx context.Context, sc config.StorageConfig) (*dynamodb.Clien
 }
 
 // newSNSClient builds an aws-sdk SNS client for the settlement publisher
-// (D-56). Region from outbox.sns_region (default AWS_REGION);
-// AWS_ENDPOINT_URL overrides the endpoint (LocalStack).
+// (D-56). Region per resolveAWSRegion (GO-02); AWS_ENDPOINT_URL overrides
+// the endpoint (LocalStack).
 func newSNSClient(ctx context.Context, oc config.OutboxConfig) (*sns.Client, error) {
-	region := oc.SNSRegion
-	if region == "" {
-		region = os.Getenv("AWS_REGION")
-	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	awsCfg, err := resolveAWSRegion(ctx, oc.SNSRegion, "outbox.sns_region", "QUOTA-CFG-010")
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return nil, err
 	}
 	var opts []func(*sns.Options)
 	if ep := os.Getenv("AWS_ENDPOINT_URL"); ep != "" {
@@ -935,6 +1188,7 @@ func logCapabilities(c Capabilities) {
 		"auto_subscribe", c.AutoSubscribe,
 		"ledger", c.LedgerBackend,
 		"float_store", c.FloatStore,
+		"redis_reachable", c.RedisReachable, // D-2 / GO-10
 		"redis_topology", c.RedisTopology, // D-71
 		"counter_eviction_policy", c.CounterEvictionPolicy, // D-72
 		"redis_scripting", c.RedisScripting, // D-73

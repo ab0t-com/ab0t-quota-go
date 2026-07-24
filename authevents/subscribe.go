@@ -23,7 +23,7 @@ import (
 //	GET  /events/subscriptions          → idempotency check
 //	POST /events/subscriptions          → create
 type SubscribeInput struct {
-	AuthURL      string // default $AB0T_AUTH_AUTH_URL / $AUTH_SERVICE_URL
+	AuthURL      string // default $AB0T_AUTH_AUTH_URL (namespaced only — GO-09)
 	AdminToken   string // default $AB0T_AUTH_ADMIN_TOKEN
 	PublicURL    string // default $AB0T_AUTH_WEBHOOK_PUBLIC_URL
 	Secret       string // default $AB0T_AUTH_WEBHOOK_SECRET
@@ -43,7 +43,11 @@ type SubscribeInput struct {
 // Best-effort — never blocks startup.
 func SubscribeOnStartup(ctx context.Context, in SubscribeInput) (string, error) {
 	if in.AuthURL == "" {
-		in.AuthURL = firstNonEmpty(os.Getenv("AB0T_AUTH_AUTH_URL"), os.Getenv("AUTH_SERVICE_URL"))
+		// GO-09: only OUR namespaced name. The generic AUTH_SERVICE_URL is
+		// another service's convention — a co-deployed service's variable must
+		// never decide which auth service we register a webhook receiver with.
+		// Unset ⇒ the explicitly-logged no-op below, never a harvested value.
+		in.AuthURL = os.Getenv("AB0T_AUTH_AUTH_URL")
 	}
 	if in.AdminToken == "" {
 		in.AdminToken = os.Getenv("AB0T_AUTH_ADMIN_TOKEN")
@@ -205,15 +209,6 @@ func resolveOrgIDFromSlug(ctx context.Context, client *http.Client, authURL, slu
 		return "", fmt.Errorf("malformed orgId")
 	}
 	return string(b[i+len(needle) : i+len(needle)+j]), nil
-}
-
-func firstNonEmpty(ss ...string) string {
-	for _, s := range ss {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 func truncate(s string, n int) string {

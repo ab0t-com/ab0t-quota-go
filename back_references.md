@@ -230,11 +230,11 @@ Exit codes: 0 success, 1 op failure (e.g. missing ledger row), 2 usage error. co
 Env vars the CLI reads:
 - `AB0T_MESH_API_KEY` — fallback auth via `X-API-Key` for `subscribe-events` (when `AB0T_AUTH_ADMIN_TOKEN` is absent)
 - `AB0T_QUOTA_DDB_TABLE`
-- `QUOTA_REDIS_URL` / `REDIS_URL`
+- `QUOTA_REDIS_URL` (namespaced only)
 - `AB0T_AUTH_WEBHOOK_PUBLIC_URL`
 - `AB0T_AUTH_WEBHOOK_SECRET`
 - `AB0T_AUTH_ADMIN_TOKEN`
-- `AB0T_AUTH_AUTH_URL` / `AUTH_SERVICE_URL`
+- `AB0T_AUTH_AUTH_URL` (namespaced only — generic fallback removed, GO-09)
 
 ---
 

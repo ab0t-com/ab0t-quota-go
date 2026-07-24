@@ -141,6 +141,11 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 		resourceKeys = nil // allowed under shadow/disabled → nothing to gate
 	}
 
+	// K-8: per-request charset guard for the keyspace-enabled path (spec §2.3).
+	if err := e.ksGuard(in.OrgID); err != nil {
+		return AcquireResult{}, err
+	}
+
 	// Resolve gauge specs (skip non-gauge resources — they don't gate concurrency).
 	type gspec struct {
 		rk   string
@@ -157,16 +162,19 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 			return AcquireResult{}, err
 		}
 		g := e.Factory.Gauge(rk)
+		op := g.OrgKeyPair(in.OrgID)
 		sp := counters.AcquireSpec{
-			OrgKey:    g.OrgKey(in.OrgID),
+			OrgKey:    op.P,
+			OrgKey2:   op.S,
 			HasUser:   in.UserID != "",
 			Delta:     1,
 			OrgLimit:  orgLimit,
 			UserLimit: userLimit,
 		}
 		if in.UserID != "" {
-			sp.UserKey = g.UserKey(in.OrgID, in.UserID)
-			sp.SeqKey = g.UserSeqKey(in.OrgID, in.UserID)
+			up, sq := g.UserKeyPair(in.OrgID, in.UserID), g.UserSeqKeyPair(in.OrgID, in.UserID)
+			sp.UserKey, sp.UserKey2 = up.P, up.S
+			sp.SeqKey, sp.SeqKey2 = sq.P, sq.S
 		}
 		gs = append(gs, gspec{rk: rk, spec: sp})
 	}
@@ -183,10 +191,22 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 	for i, g := range gs {
 		specs[i] = g.spec
 	}
-	var idemKey string
 	hasIdem := in.IdempotencyKey != ""
 	// idem key shares the first gauge's namespace (Python: specs[0] gauge).
-	idemKey = e.Factory.Gauge(gs[0].rk).IdemKey(in.OrgID, in.IdempotencyKey)
+	idemPair := e.Factory.Gauge(gs[0].rk).IdemKeyPair(in.OrgID, in.IdempotencyKey)
+	idemKey := idemPair.P
+	// K-8 dual: latches claimed on BOTH shapes, seed-if-absent, mutate-both.
+	dual := idemPair.S != ""
+	runAcquire := func(specs []counters.AcquireSpec) (counters.AcquireOutcome, error) {
+		if dual {
+			d, derr := e.dualOps()
+			if derr != nil {
+				return counters.AcquireOutcome{}, derr
+			}
+			return d.DualAtomicAcquire(ctx, idemPair, hasIdem, 0, e.ks().PrimaryIsV2(), specs)
+		}
+		return acq.AtomicAcquire(ctx, idemKey, hasIdem, 0, specs)
+	}
 
 	// D-55: honour enabled/shadow like Check. enforcement.enabled=false →
 	// bypass limits entirely (admit + spend). This clears the caps up front so
@@ -199,7 +219,7 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 		}
 	}
 
-	out, err := acq.AtomicAcquire(ctx, idemKey, hasIdem, 0, specs)
+	out, err := runAcquire(specs)
 	if err != nil {
 		return AcquireResult{}, err
 	}
@@ -217,7 +237,7 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 			for i := range specs {
 				specs[i].OrgLimit, specs[i].UserLimit = nil, nil
 			}
-			out, err = acq.AtomicAcquire(ctx, idemKey, hasIdem, 0, specs)
+			out, err = runAcquire(specs)
 			if err != nil {
 				return AcquireResult{}, err
 			}
@@ -302,11 +322,11 @@ func (e *Engine) ReleaseActivation(ctx context.Context, activationID string) (bo
 			continue
 		}
 		g := e.Factory.Gauge(rk)
-		if _, err := e.Factory.Floats.DecrByFloorZero(ctx, g.OrgKey(row.OrgID), delta); err != nil {
+		if _, err := e.decrFloor(ctx, g.OrgKeyPair(row.OrgID), delta); err != nil {
 			return true, err
 		}
 		if row.UserID != nil && *row.UserID != "" {
-			if _, err := e.Factory.Floats.DecrByFloorZero(ctx, g.UserKey(row.OrgID, *row.UserID), delta); err != nil {
+			if _, err := e.decrFloor(ctx, g.UserKeyPair(row.OrgID, *row.UserID), delta); err != nil {
 				return true, err
 			}
 		}

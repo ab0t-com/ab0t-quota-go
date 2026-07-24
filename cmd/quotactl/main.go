@@ -42,6 +42,8 @@ func newRoot() *cobra.Command {
 		newBackfillCmd(),
 		newDeleteUserCmd(),
 		newCapabilitiesCmd(),
+		newDoctorCmd(),    // ST-CLI-1: posture grading, honest about limits (D-8)
+		newProvisionCmd(), // ST-CLI-1: the vehicle — emit-and-let-them-apply
 	)
 	return root
 }

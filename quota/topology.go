@@ -50,9 +50,21 @@ const (
 	// TopologyNA — no Redis counter store at all (in-memory): there is no cluster
 	// to CROSSSLOT on. An affirmative statement, not an absence.
 	TopologyNA = "n/a (no redis counter store)"
+	// TopologyProbeFailed — the probe could not RUN (authentication or
+	// connection failure). NOT a topology verdict (T-G3/GO-05): the topology
+	// was never checked, and no operator assertion masks this state — the
+	// remedy is credentials/reachability, never redis_cluster_confirmed_disabled.
+	TopologyProbeFailed = "PROBE FAILED (reachability/credentials — not a topology verdict)"
 
 	// ClusterConfirmEnv mirrors storage.redis_cluster_confirmed_disabled (config wins).
 	ClusterConfirmEnv = "AB0T_QUOTA_REDIS_CLUSTER_CONFIRMED_DISABLED"
+
+	// The data-plane probe keys: two hash tags in provably different slots
+	// ("foo" → slot 12182, "bar" → slot 5061 — the redis-doc examples; the
+	// slot difference is pinned by a CRC16 unit test). A multi-key EXISTS on
+	// them CROSSSLOTs on any real cluster with NO admin privilege needed.
+	topologyProbeKeyA = "quota:topology-probe:{foo}"
+	topologyProbeKeyB = "quota:topology-probe:{bar}"
 )
 
 // ErrClusterTopology is the typed startup refusal (D-71).
@@ -74,14 +86,45 @@ const unknownRefusal = "ab0t-quota could not VERIFY the Redis topology: neither 
 	"not clustered — put that assertion on the record by setting storage.redis_cluster_confirmed_disabled: true " +
 	"in quota-config.json (env: AB0T_QUOTA_REDIS_CLUSTER_CONFIRMED_DISABLED=true)."
 
+const probeFailedRefusal = "ab0t-quota could not REACH or AUTHENTICATE to the configured Redis while probing its " +
+	"topology. This is NOT a topology verdict: the topology/eviction/scripting checks never ran. Remedy: fix the " +
+	"credential or reachability condition named in the detail (storage.redis_url / storage.redis_password / URL " +
+	"userinfo, network path). Setting storage.redis_cluster_confirmed_disabled would NOT help and is not the " +
+	"remedy — that assertion exists for a reachable Redis whose topology cannot be probed."
+
 // TopologyError builds the loud, typed refusal. It names the CAUSE and the
 // REMEDY — a refusal a client cannot act on is just an outage.
 func TopologyError(topology, detail string) error {
 	head := unknownRefusal
-	if topology == TopologyCluster {
+	switch topology {
+	case TopologyCluster:
 		head = clusterRefusal
+	case TopologyProbeFailed:
+		head = probeFailedRefusal
 	}
 	return fmt.Errorf("%w: %s [detail: %s]", ErrClusterTopology, head, detail)
+}
+
+// classifyProbeErr sorts a probe error into the T-G3 taxonomy:
+//   - "auth"       — failed AUTHENTICATION (NOAUTH/WRONGPASS/…): probe failed;
+//   - "connection" — network/reachability: probe failed;
+//   - ""           — anything else (NOPERM ACL denial, unknown command,
+//     trimmed INFO): a genuinely ABSENT signal — the operator-assertion path.
+//
+// The distinction is load-bearing: NOPERM means "this least-privilege user may
+// not run admin probes" (assertion applies); NOAUTH/WRONGPASS/refused means
+// "nothing was checked at all" (assertion must NOT apply).
+func classifyProbeErr(err error) string {
+	// T-13: one taxonomy, shared with the D-2 reachability gate
+	// (redisguard.ClassifyRedisError — Python parity). For the TOPOLOGY
+	// probes, 'acl' (NOPERM) maps to "" — the genuine absent-signal case
+	// where the operator assertion applies.
+	switch kind := redisguard.ClassifyRedisError(err); kind {
+	case "acl":
+		return ""
+	default:
+		return kind // "auth" | "unreachable" | ""
+	}
 }
 
 // ParseClusterEnabled pulls cluster_enabled:{0,1} out of an INFO payload.
@@ -122,28 +165,92 @@ type TopologyProber interface {
 // where *answering at all* is the positive cluster signal and the "cluster support
 // disabled" error is the positive single-node signal.
 func ProbeClusterEnabled(ctx context.Context, c TopologyProber) (bool, bool, string) {
+	enabled, found, probe, perr := probeClusterEnabledClassified(ctx, c)
+	if perr != nil {
+		// Compatibility shape only — CheckRedisClusterTopology consults the
+		// classified variant and never reaches EvaluateTopology on a failed
+		// probe (T-G3: a failed probe is not an absent signal).
+		return false, false, "probe failed: " + perr.Error()
+	}
+	return enabled, found, probe
+}
+
+// probeClusterEnabledClassified is ProbeClusterEnabled with the T-G3 error
+// taxonomy: an auth/connection failure returns a non-nil error (the probe
+// NEVER RAN — not a verdict, not an absent signal); NOPERM/unsupported/
+// trimmed responses remain the found=false absent-signal path.
+func probeClusterEnabledClassified(ctx context.Context, c TopologyProber) (bool, bool, string, error) {
 	infoWhy := "no cluster_enabled field"
 	if raw, err := c.Info(ctx, "cluster").Result(); err != nil {
+		if kind := classifyProbeErr(err); kind != "" {
+			return false, false, "", fmt.Errorf(
+				"INFO cluster probe failed (%s): %v — a reachability/credential condition, not a topology signal", kind, err)
+		}
 		infoWhy = err.Error()
 	} else if v, ok := ParseClusterEnabled(raw); ok {
-		return v, true, "INFO cluster"
+		return v, true, "INFO cluster", nil
 	}
 
 	raw, err := c.ClusterInfo(ctx).Result()
 	if err != nil {
+		// DISCLOSED HEURISTIC (D-14 #4 / F-1 sweep): matches the real redis
+		// server's own message ("This instance has cluster support disabled"),
+		// observed at real redis:7 (file header) and passed through verbatim
+		// by the pinned go-redis v9.6.1.
 		if strings.Contains(strings.ToLower(err.Error()), "cluster support disabled") {
-			return false, true, "CLUSTER INFO (server: cluster support disabled)"
+			return false, true, "CLUSTER INFO (server: cluster support disabled)", nil
 		}
-		return false, false, fmt.Sprintf("INFO cluster [%s]; CLUSTER INFO [%s]", infoWhy, err.Error())
+		if kind := classifyProbeErr(err); kind != "" {
+			return false, false, "", fmt.Errorf(
+				"CLUSTER INFO probe failed (%s): %v — a reachability/credential condition, not a topology signal", kind, err)
+		}
+		return false, false, fmt.Sprintf("INFO cluster [%s]; CLUSTER INFO [%s]", infoWhy, err.Error()), nil
 	}
 	if v, ok := ParseClusterEnabled(raw); ok {
-		return v, true, "CLUSTER INFO"
+		return v, true, "CLUSTER INFO", nil
 	}
 	if strings.Contains(raw, "cluster_state") {
 		// It answered CLUSTER INFO at all ⇒ this server runs in cluster mode.
-		return true, true, "CLUSTER INFO (answered ⇒ cluster mode)"
+		return true, true, "CLUSTER INFO (answered ⇒ cluster mode)", nil
 	}
-	return false, false, fmt.Sprintf("INFO cluster [%s]; CLUSTER INFO [unparseable]", infoWhy)
+	return false, false, fmt.Sprintf("INFO cluster [%s]; CLUSTER INFO [unparseable]", infoWhy), nil
+}
+
+// dataPlaneProber is satisfied by *redis.Client but deliberately NOT by the
+// narrow TopologyProber fakes — probes that cannot EXISTS simply skip the
+// data-plane leg.
+type dataPlaneProber interface {
+	Exists(ctx context.Context, keys ...string) *redis.IntCmd
+}
+
+// probeDataPlaneCrossslot runs the PRIMARY, privilege-free probe (parent-pack
+// T4, Go leg): a multi-key EXISTS on two different-slot hash tags.
+//   - CROSSSLOT error  ⇒ DEFINITIVE cluster ("cluster", done) — the exact
+//     failure the guard exists to prevent, observed on the data plane.
+//     DISCLOSED HEURISTIC (D-14 #4 / F-1): keys on the SERVER's error prefix,
+//     which the pinned go-redis v9.6.1 surfaces VERBATIM
+//     (proto.ParseErrorReply → RedisError(line[1:]); v9.21.0's typed
+//     ErrCrossSlot embeds the same prefix). Pinned END-TO-END by
+//     topology_wire_f1_20260721_test.go: a future go-redis that rewraps
+//     server errors turns those tests RED — Python's redis-py DID rewrite,
+//     and its probe was dead code behind a green hand-raised pin;
+//   - auth/connection  ⇒ probe failure (error);
+//   - success or other ⇒ NOT definitive ("", nil): a splitting proxy can pass
+//     per-key EXISTS while the multi-key Lua still CROSSSLOTs — fall through
+//     to the admin probes, and unverifiable still fails closed.
+func probeDataPlaneCrossslot(ctx context.Context, dp dataPlaneProber) (string, error) {
+	err := dp.Exists(ctx, topologyProbeKeyA, topologyProbeKeyB).Err()
+	switch {
+	case err == nil:
+		return "", nil
+	case strings.Contains(strings.ToUpper(err.Error()), "CROSSSLOT"):
+		return "data-plane probe: multi-key EXISTS across slots failed with CROSSSLOT — this Redis IS a cluster (no admin command was needed to know it)", nil
+	default:
+		if kind := classifyProbeErr(err); kind != "" {
+			return "", fmt.Errorf("data-plane probe failed (%s): %v — a reachability/credential condition, not a topology signal", kind, err)
+		}
+		return "", nil
+	}
 }
 
 // EvaluateTopology is the pure topology decision (D-71), separated from the Redis
@@ -175,9 +282,28 @@ func EvaluateTopology(clusterEnabled, found, confirmedDisabled bool, probe strin
 }
 
 // CheckRedisClusterTopology asks the client's Redis what it is → (topology, reason).
-// Never returns an error: the caller decides what to do with UNKNOWN/CLUSTER.
+// Never returns an error value: the caller decides what to do with
+// UNKNOWN/CLUSTER/PROBE-FAILED (Setup refuses on all three, with per-state text).
+//
+// T-G3 order: (1) the data-plane CROSSSLOT probe — privilege-free and
+// definitive in the cluster direction; (2) the admin probes with the error
+// taxonomy; a failed probe short-circuits BEFORE EvaluateTopology, so no
+// operator assertion can mask it (parent T3: assertion flags exist for an
+// absent signal, never for a failed probe).
 func CheckRedisClusterTopology(ctx context.Context, c TopologyProber, confirmedDisabled bool) (string, string) {
-	enabled, found, probe := ProbeClusterEnabled(ctx, c)
+	if dp, ok := c.(dataPlaneProber); ok {
+		verdict, perr := probeDataPlaneCrossslot(ctx, dp)
+		if perr != nil {
+			return TopologyProbeFailed, perr.Error()
+		}
+		if verdict != "" {
+			return TopologyCluster, verdict
+		}
+	}
+	enabled, found, probe, perr := probeClusterEnabledClassified(ctx, c)
+	if perr != nil {
+		return TopologyProbeFailed, perr.Error()
+	}
 	return EvaluateTopology(enabled, found, confirmedDisabled, probe)
 }
 

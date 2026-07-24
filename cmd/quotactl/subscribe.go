@@ -24,7 +24,7 @@ func newSubscribeCmd() *cobra.Command {
 		Long: `Subscribes to auth events on the configured AB0T_AUTH_AUTH_URL.
 
 Env required:
-  AB0T_AUTH_AUTH_URL              (or AUTH_SERVICE_URL)
+  AB0T_AUTH_AUTH_URL
   AB0T_AUTH_ADMIN_TOKEN
   AB0T_AUTH_WEBHOOK_PUBLIC_URL
   AB0T_AUTH_WEBHOOK_SECRET`,

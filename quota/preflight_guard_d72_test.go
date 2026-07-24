@@ -177,7 +177,7 @@ func TestSetup_RefusesUnverifiableCounterStore_D72(t *testing.T) {
 	t.Setenv(redisguard.DurabilityConfirmEnv, "")
 	mr := miniredis.RunT(t)
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + mr.Addr(), RedisClusterConfirmedDisabled: true}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + mr.Addr()), RedisClusterConfirmedDisabled: true}
 
 	_, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err == nil {
@@ -196,7 +196,7 @@ func TestSetup_OperatorAssertion_AllowsStart_AndIsOnTheRecord_D72(t *testing.T) 
 	mr := miniredis.RunT(t)
 	c := minimalConfig()
 	c.Storage = config.StorageConfig{
-		RedisURL:                      "redis://" + mr.Addr(),
+		RedisURL:                      config.Declare("redis://" + mr.Addr()),
 		RedisClusterConfirmedDisabled: true,
 		RedisDurabilityConfirmed:      true,
 	}
@@ -226,6 +226,8 @@ func TestHealthy_FailsOnUnsafeCounterStore_D72_D73(t *testing.T) {
 	base := Capabilities{
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
 		RedisTopology: TopologySingleNode, FloatStore: "redis",
+		// T-13 fixture: the new D-2/GO-10 reachability guard requires the affirmative value.
+		RedisReachable: redisguard.RedisReachableOK,
 		CounterEvictionPolicy: "noeviction", RedisScripting: "on (EVAL verified)",
 		// D-80/D-79 — the probe now also requires the FACT (no observed evictions) and the
 		// DERIVED guarantee (the invariants are actually being re-verified).
@@ -272,7 +274,7 @@ func TestRealEvictingRedis_IsRefused_D72(t *testing.T) {
 	}
 	t.Setenv(redisguard.DurabilityConfirmEnv, "")
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + addr, RedisClusterConfirmedDisabled: true}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + addr), RedisClusterConfirmedDisabled: true}
 
 	_, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err == nil {
@@ -290,7 +292,7 @@ func TestRealScriptingDisabledRedis_IsRefused_D73(t *testing.T) {
 	}
 	c := minimalConfig()
 	c.Storage = config.StorageConfig{
-		RedisURL:                      "redis://" + addr,
+		RedisURL:                      config.Declare("redis://" + addr),
 		RedisClusterConfirmedDisabled: true,
 		RedisDurabilityConfirmed:      true, // isolate D-73 from D-72
 	}
@@ -312,7 +314,7 @@ func TestRealSafeRedis_IsAccepted_D72_D73_D74(t *testing.T) {
 	// refuses everything has told you nothing.
 	t.Setenv(redisguard.DurabilityConfirmEnv, "")
 	c := minimalConfig()
-	c.Storage = config.StorageConfig{RedisURL: "redis://" + addr, RedisClusterConfirmedDisabled: true}
+	c.Storage = config.StorageConfig{RedisURL: config.Declare("redis://" + addr), RedisClusterConfirmedDisabled: true}
 
 	q, err := Setup(context.Background(), Options{ConfigOverride: c})
 	if err != nil {

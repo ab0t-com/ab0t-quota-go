@@ -84,6 +84,36 @@ func (e *Engine) TouchGuard(window time.Duration) func(org, rk string) bool {
 	return func(org, rk string) bool { return e.RecentlyTouched(org, rk, window) }
 }
 
+// ks returns the engine's declared keyspace state (K-8). Zero value = the
+// legacy v1 path, byte-identical to pre-keyspace behaviour.
+func (e *Engine) ks() counters.Keyspace {
+	if e.Factory == nil {
+		return counters.Keyspace{}
+	}
+	return e.Factory.Keyspace
+}
+
+// ksGuard is the per-request charset guard (spec §2.3): when the keyspace is
+// enabled, an org id that cannot be embedded in a hash-tagged key REFUSES
+// loudly — never a mangled/corrupt key (mirrors Python validate_scope).
+func (e *Engine) ksGuard(org string) error {
+	if !e.ks().Enabled() {
+		return nil
+	}
+	return counters.ValidateScope(org, "org_id")
+}
+
+// dualOps resolves the store's dual-write surface; a declared dual against a
+// store without it is a REFUSAL, never a silent single-shape write (D-KS-8).
+func (e *Engine) dualOps() (counters.DualOps, error) {
+	d, ok := e.Factory.Floats.(counters.DualOps)
+	if !ok {
+		return nil, fmt.Errorf("engine: keyspace_dual_write declared but store %T has no "+
+			"DualOps — refusing a silent single-shape write", e.Factory.Floats)
+	}
+	return d, nil
+}
+
 // Check runs the quota decision for a single resource. Returns a Result
 // the middleware can serialize.
 func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
@@ -157,6 +187,9 @@ func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
 	}
 
 	org := partitionOrg(in.UserID, in.OrgID)
+	if err := e.ksGuard(org); err != nil {
+		return Result{}, err
+	}
 	used, err := e.currentUsage(ctx, res, org, now)
 	if err != nil {
 		return Result{}, fmt.Errorf("engine: usage lookup: %w", err)
@@ -169,7 +202,7 @@ func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
 	if res.CounterType == config.CounterGauge && in.UserID != "" {
 		if pul := limit.DerivePerUserLimit(tier.DefaultPerUserFraction); pul != nil {
 			g := e.Factory.Gauge(res.ResourceKey)
-			userUsed, _, uerr := e.Factory.Floats.GetFloat(ctx, g.UserKey(org, in.UserID))
+			userUsed, _, uerr := counters.GetFloatDual(ctx, e.Factory.Floats, g.UserKeyPair(org, in.UserID))
 			if uerr != nil {
 				return Result{}, fmt.Errorf("engine: per-user usage lookup: %w", uerr)
 			}
@@ -283,6 +316,9 @@ func (e *Engine) Spend(ctx context.Context, in CheckInput) (float64, error) {
 		return 0, fmt.Errorf("engine: unknown resource_key %q", in.ResourceKey)
 	}
 	org := partitionOrg(in.UserID, in.OrgID)
+	if err := e.ksGuard(org); err != nil {
+		return 0, err
+	}
 	now := e.now()
 	switch res.CounterType {
 	case config.CounterAccumulator:
@@ -298,13 +334,26 @@ func (e *Engine) Spend(ctx context.Context, in CheckInput) (float64, error) {
 		// verified it Spends before provisioning.
 		if e.Cfg != nil && e.Cfg.Enforcement.LegacyIncrementMode() == "enforce" && orgLimit != nil {
 			if acq, ok := e.Factory.Floats.(counters.GaugeAcquirer); ok {
-				spec := counters.AcquireSpec{OrgKey: g.OrgKey(org), Delta: in.Cost, OrgLimit: orgLimit}
+				op := g.OrgKeyPair(org)
+				spec := counters.AcquireSpec{OrgKey: op.P, OrgKey2: op.S, Delta: in.Cost, OrgLimit: orgLimit}
 				if in.UserID != "" {
+					up, sp2 := g.UserKeyPair(org, in.UserID), g.UserSeqKeyPair(org, in.UserID)
 					spec.HasUser = true
-					spec.UserKey = g.UserKey(org, in.UserID)
-					spec.SeqKey = g.UserSeqKey(org, in.UserID)
+					spec.UserKey, spec.UserKey2 = up.P, up.S
+					spec.SeqKey, spec.SeqKey2 = sp2.P, sp2.S
 				}
-				out, aerr := acq.AtomicAcquire(ctx, "", false, 0, []counters.AcquireSpec{spec})
+				var out counters.AcquireOutcome
+				var aerr error
+				if op.S != "" { // K-8 dual: seed + mutate BOTH shapes atomically
+					d, derr := e.dualOps()
+					if derr != nil {
+						return 0, derr
+					}
+					out, aerr = d.DualAtomicAcquire(ctx, g.IdemKeyPair(org, ""), false, 0,
+						e.ks().PrimaryIsV2(), []counters.AcquireSpec{spec})
+				} else {
+					out, aerr = acq.AtomicAcquire(ctx, "", false, 0, []counters.AcquireSpec{spec})
+				}
 				if aerr != nil {
 					return 0, aerr
 				}
@@ -319,18 +368,38 @@ func (e *Engine) Spend(ctx context.Context, in CheckInput) (float64, error) {
 		// partition (TASK P5.4) is maintained alongside it, mirroring
 		// Python (gauge.py:42-46). Best-effort on the user partition — an
 		// error there must not lose the org increment already applied.
-		newVal, err := e.Factory.Floats.IncrByFloat(ctx, g.OrgKey(org), in.Cost)
-		if err != nil {
-			return 0, err
-		}
-		e.recordTouch(org, res.ResourceKey) // recent-activity guard (D-62)
-		var userVal float64
-		if in.UserID != "" {
-			uv, uerr := e.Factory.Floats.IncrByFloat(ctx, g.UserKey(org, in.UserID), in.Cost)
-			if uerr != nil {
-				return newVal, fmt.Errorf("engine: user partition increment: %w", uerr)
+		var newVal, userVal float64
+		var err error
+		if op := g.OrgKeyPair(org); op.S != "" {
+			// K-8 dual: seed-if-absent + mutate BOTH shapes in one atomic op.
+			d, derr := e.dualOps()
+			if derr != nil {
+				return 0, derr
 			}
-			userVal = uv
+			if in.UserID != "" {
+				newVal, userVal, err = d.DualSpendUser(ctx, op,
+					g.UserKeyPair(org, in.UserID), g.UserSeqKeyPair(org, in.UserID),
+					in.Cost, e.ks().PrimaryIsV2())
+			} else {
+				newVal, err = d.DualSpendOrg(ctx, op, in.Cost, e.ks().PrimaryIsV2())
+			}
+			if err != nil {
+				return 0, err
+			}
+			e.recordTouch(org, res.ResourceKey)
+		} else {
+			newVal, err = e.Factory.Floats.IncrByFloat(ctx, g.OrgKey(org), in.Cost)
+			if err != nil {
+				return 0, err
+			}
+			e.recordTouch(org, res.ResourceKey) // recent-activity guard (D-62)
+			if in.UserID != "" {
+				uv, uerr := e.Factory.Floats.IncrByFloat(ctx, g.UserKey(org, in.UserID), in.Cost)
+				if uerr != nil {
+					return newVal, fmt.Errorf("engine: user partition increment: %w", uerr)
+				}
+				userVal = uv
+			}
 		}
 		// D-24 count_and_alert: crossing the limit is an OBSERVABLE fact
 		// (D-26), not a silent undercount. Emit over_limit_admitted → the
@@ -388,11 +457,14 @@ func (e *Engine) Release(ctx context.Context, in CheckInput) error {
 		return nil
 	}
 	org := partitionOrg(in.UserID, in.OrgID)
+	if err := e.ksGuard(org); err != nil {
+		return err
+	}
 	g := e.Factory.Gauge(res.ResourceKey)
 	orgLimit, userLimit, _ := e.gaugeLimit(ctx, org, in.UserID, res.ResourceKey)
 	// Floor at zero atomically — a gauge must never go negative or it
 	// manufactures free quota headroom (finding QG-06).
-	newOrg, err := e.Factory.Floats.DecrByFloorZero(ctx, g.OrgKey(org), in.Cost)
+	newOrg, err := e.decrFloor(ctx, g.OrgKeyPair(org), in.Cost)
 	if err != nil {
 		return err
 	}
@@ -404,7 +476,7 @@ func (e *Engine) Release(ctx context.Context, in CheckInput) error {
 			Scope: "org", Level: newOrg, Limit: *orgLimit})
 	}
 	if in.UserID != "" {
-		newUser, err := e.Factory.Floats.DecrByFloorZero(ctx, g.UserKey(org, in.UserID), in.Cost)
+		newUser, err := e.decrFloor(ctx, g.UserKeyPair(org, in.UserID), in.Cost)
 		if err != nil {
 			return fmt.Errorf("engine: user partition decrement: %w", err)
 		}
@@ -423,7 +495,7 @@ func (e *Engine) currentUsage(ctx context.Context, res config.ResourceDef, org s
 		return a.GetOrg(ctx, org, now)
 	case config.CounterGauge:
 		g := e.Factory.Gauge(res.ResourceKey)
-		v, _, err := e.Factory.Floats.GetFloat(ctx, g.OrgKey(org))
+		v, _, err := counters.GetFloatDual(ctx, e.Factory.Floats, g.OrgKeyPair(org))
 		return v, err
 	case config.CounterRate:
 		r := e.Factory.Rate(res)
@@ -438,6 +510,19 @@ func (e *Engine) now() time.Time {
 		return e.Clock()
 	}
 	return time.Now()
+}
+
+// decrFloor floors-at-zero on the authoritative shape; during dual (K-8) it
+// seeds + decrements BOTH shapes atomically via DualOps.
+func (e *Engine) decrFloor(ctx context.Context, pair counters.DualPair, amount float64) (float64, error) {
+	if pair.S == "" {
+		return e.Factory.Floats.DecrByFloorZero(ctx, pair.P, amount)
+	}
+	d, err := e.dualOps()
+	if err != nil {
+		return 0, err
+	}
+	return d.DualDecrFloor(ctx, pair, amount, e.ks().PrimaryIsV2())
 }
 
 // partitionOrg returns the value that fills the {org} slot of the Python

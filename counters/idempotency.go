@@ -32,7 +32,7 @@ func HashKey(s string) string {
 
 // Key returns the Redis key for an idempotency entry.
 func (i IdempotencyStore) Key(hash string) string {
-	return i.Prefix.Build("idempotency", hash)
+	return DeprecatedScopeKey(i.Prefix, "idempotency", hash)
 }
 
 // Claim attempts to claim ownership of key for ttl. Returns:

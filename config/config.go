@@ -57,6 +57,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: engine_mode %q is out of scope for v0.1.0", c.EngineMode)
 	}
 
+	// K-1 (ST-KEYSPACE-1): only defined keyspace versions — an unknown version
+	// silently falling back to a shape would orphan every live counter.
+	if v := c.Storage.KeyspaceVersion; v != 0 && v != 1 && v != 2 {
+		return fmt.Errorf("config: storage.keyspace_version must be 1 or 2 (got %d) — "+
+			"an unknown keyspace version would orphan every live counter", v)
+	}
+	if (c.Storage.KeyspaceVersion == 2 || c.Storage.KeyspaceDualWrite) && c.ServiceName == "" {
+		return fmt.Errorf("config: keyspace v2 keys carry a service segment — declare " +
+			"service_name before storage.keyspace_version=2 or keyspace_dual_write")
+	}
+	// K-8: keyspace_version/keyspace_dual_write are now CONSUMED by Setup
+	// (engine + counters route through counters.Keyspace; boot guards
+	// QUOTA-CFG-011/012 run via counters.CheckBootKeyspace). D-KS-8's
+	// declared-but-unwired refusal is lifted by the change that wired it.
+
 	if len(c.Tiers) == 0 {
 		return fmt.Errorf("config: tiers[] is required")
 	}

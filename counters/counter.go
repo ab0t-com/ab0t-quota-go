@@ -77,7 +77,7 @@ type Counter struct {
 // NOTE (QG-07): Go-only shape quota:counter:{rk}:{scope}:{period}; NOT a
 // Python parity key (Python has no plain counter). Not used by the engine.
 func (c Counter) PeriodKey(scope, period string) string {
-	return c.Prefix.Build("counter", c.ResourceKey, scope, period)
+	return DeprecatedScopeKey(c.Prefix, "counter", c.ResourceKey, scope, period)
 }
 
 // Increment adds delta and returns the new value. delta may be negative.

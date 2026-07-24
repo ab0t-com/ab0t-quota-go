@@ -205,6 +205,7 @@ Resulting `quota-config.json` (abbreviated — schema in `ab0t-quota-go-config`)
 {
   "service_name": "summarizer",
   "tier_provider": { "type": "mesh", "default_tier": "free" },
+  "storage": { "redis_url": "${QUOTA_REDIS_URL}" },
   "enforcement": { "enabled": true, "shadow_mode": true },
   "resources": [
     { "service": "summarizer", "resource_key": "summarize.tokens",

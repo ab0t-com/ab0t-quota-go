@@ -10,6 +10,8 @@ type Gauge struct {
 	Store       FloatStore
 	Prefix      KeyPrefix
 	ResourceKey string
+	// Keyspace (K-8): zero value = legacy v1 path, byte-identical.
+	Keyspace Keyspace
 }
 
 // Key returns the gauge's key for the scope.
@@ -17,5 +19,5 @@ type Gauge struct {
 // Deprecated: produces the non-parity shape quota:gauge:{rk}:{scope}
 // (finding QG-03). Use OrgKey/UserKey (keys_python.go). Retained until D-13.
 func (g Gauge) Key(scope string) string {
-	return g.Prefix.Build("gauge", g.ResourceKey, scope)
+	return DeprecatedScopeKey(g.Prefix, "gauge", g.ResourceKey, scope)
 }

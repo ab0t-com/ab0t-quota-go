@@ -29,7 +29,7 @@ Tickets to file against the upstream repos. The Go port's behavior in these area
 ## Design principles (non-negotiable)
 
 1. **Drop-in.** A new consumer should reach a working state with `go get`, one `Setup` call, two env vars, and one JSON config. No required boilerplate.
-2. **Contract parity with Python.** Same JSON config schema, same Redis key shapes, same DynamoDB item shapes, same wire-level HTTP routes, same CLI subcommands. A Python deployment's data must be readable by a Go deployment and vice versa.
+2. **Contract parity with Python — PROVEN, not promised.** Same JSON config schema, same Redis key shapes, same DynamoDB item shapes, same wire-level HTTP routes, same CLI subcommands; a Python deployment's data must be readable by a Go deployment and vice versa. The PROOF is the shared conformance spine (`conformance/scenarios.json` — one canonical file, two runners: the engine scenario suite plus the ST-* structural items, each bound per-runtime and census-checked). Every KNOWN divergence is on the record — in the `known_divergences` register or the scenario item itself (e.g. D-5(b): Go declares in-memory as `"memory://"`, Python refuses it toward bridge mode; Go reaches `redis_topology = n/a (no redis counter store)` via that declaration while Python accepts-but-does-not-yet-produce it pending bridge/FUTURE-1). The runtimes agree on the RULE and differ only where their engines genuinely differ, on the record. A parity claim with no binding test is treated as FALSE (the orphan lesson, pack 20260721).
 3. **Idiomatic Go.** Interfaces over abstract base classes. Functional options. Errors with `fmt.Errorf("%w", ...)`. `context.Context` on every external call. No global mutable state outside the package-level handler registry (which mirrors Python's module-level registry by design).
 4. **Minimal deps.** Standard library wherever possible. Third-party deps require justification (listed in [Dependencies](#dependencies) below).
 5. **Test-first.** Each package has ≥ 80% statement coverage. Storage backends share a conformance suite. End-to-end tests use `httptest.Server`.
@@ -823,6 +823,10 @@ func (c *PaymentClient) ForwardStripeWebhook(ctx context.Context, body []byte, s
 // $ quotactl replay --handler X --event-id evt_xxx [--webhook-url ...]
 // $ quotactl backfill --handler X --user-ids u1,u2,u3 --org-id O [--event-type auth.user.registered]
 // $ quotactl delete-user --user-id u123 --confirm
+// $ quotactl capabilities [--config quota-config.json]
+// $ quotactl provision --emit compose|terraform|acl|iam    # never creates cloud resources
+// $ quotactl provision --local [--port N] [--name NAME] [--dry-run]
+// $ quotactl doctor [--config ...] [--json] [--fail-on-risk]  # ST-CLI-1; runs full Setup (stated — never claims read-only)
 
 func main() {
     cmd.Execute()  // cobra root command
@@ -832,7 +836,7 @@ func main() {
 Each subcommand file (`subscribe_events.go`, etc.) defines a `*cobra.Command`
 with the same flag names + semantics as the Python CLI. They share
 `store_from_env.go` which assembles a `LedgerStore` from env vars
-(`AB0T_QUOTA_DDB_TABLE`, `QUOTA_REDIS_URL`, `REDIS_URL`).
+(`AB0T_QUOTA_DDB_TABLE`, `QUOTA_REDIS_URL` — namespaced only; the generic name was never honoured and is forbidden by the declared-not-discovered contract).
 
 ---
 
@@ -993,18 +997,18 @@ Handler errors are caught + logged inside the dispatcher; auth always sees 200 (
 | `AB0T_MESH_BILLING_URL` | billing client | dev URL override; not part of the consumer-facing API |
 | `AB0T_MESH_PAYMENT_URL` | payment client | dev URL override |
 | `AB0T_SERVICE_NAME` | catalog publish, bridge identity | resolution order: env → `config.service_name` → first resource's `service` → skip |
-| `AB0T_AUTH_AUTH_URL` (fallback `AUTH_SERVICE_URL`) | webhook subscribe, org resolution | second fallback exists in Python; preserve |
+| `AB0T_AUTH_AUTH_URL` | webhook subscribe, org resolution | namespaced only — the generic fallback was removed (GO-09, pack 20260721): another service's variable must not aim our webhook registration |
 | `AB0T_AUTH_ADMIN_TOKEN` | subscription writes | needs `events.subscribe` + `events.read` + `events.test` perms |
 | `AB0T_AUTH_WEBHOOK_PUBLIC_URL` | auto-subscribe | public base URL receivers register |
 | `AB0T_AUTH_WEBHOOK_SECRET` | receiver + auto-subscribe | HMAC secret; per-subscription operator-generated |
 | `AB0T_AUTH_WATCH_ORG_SLUG` (fallback `AB0T_AUTH_ORG_SLUG`) | subscription filter | |
-| `AB0T_QUOTA_STRIPE_WEBHOOK_SECRET` (fallback `STRIPE_WEBHOOK_SECRET`) | Stripe webhook proxy | only when C4 resolves to "port" |
+| `AB0T_QUOTA_STRIPE_WEBHOOK_SECRET` | Stripe webhook proxy | namespaced only (only when C4 resolves to "port"); the generic name is a REMOVED source mesh-wide — presence-only deprecation detection per D-10, never a fallback |
 | `AB0T_MESH_SNS_LIFECYCLE_TOPIC_ARN` (fallback `SNS_LIFECYCLE_TOPIC_ARN`) | LifecycleEmitter | only when M3 resolves to "port SNS" |
 | `AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS` | config load | gate for non-stable billing_model values; fail-loud at load |
 | `AB0T_QUOTA_DDB_TABLE` | CLI ledger store | |
 | `QUOTA_CONFIG_PATH` | config load | search-path entry |
-| `QUOTA_REDIS_URL` (fallback `REDIS_URL`) | storage | default `redis://localhost:6379/0` |
-| `QUOTA_REDIS_PASSWORD` (fallback `REDIS_PASSWORD`) | storage | house convention |
+| `QUOTA_REDIS_URL` | storage | namespaced only, no invented default: an undeclared store is a startup error (QUOTA-CFG-001); explicit `"memory://"` declares single-process dev |
+| `QUOTA_REDIS_PASSWORD` | storage | namespaced only — no generic fallback |
 | `QUOTA_FAIL_OPEN_DURING_STARTUP` | consumer-side escape hatch | pre-flight checks fail-closed by default, 503 before engine-ready; this opens that window |
 | `QUOTA_*` (namespace) | config interpolation | `${VAR}` / `${VAR:-default}` expansion in JSON values; non-`QUOTA_`-prefixed refs warn |
 | `DYNAMODB_ENDPOINT` | persistence | SSRF-guarded allowlist; only the documented test/dev hosts |

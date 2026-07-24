@@ -28,7 +28,10 @@ func TestSetup_RejectsNonDefaultKeyPrefix_D17(t *testing.T) {
 func TestSetup_AcceptsDefaultAndEmptyPrefix_D17(t *testing.T) {
 	for _, p := range []string{"", "quota"} {
 		cfg := minimalConfig()
-		cfg.Storage = config.StorageConfig{RedisKeyPrefix: p}
+		// T-G1: set the field, don't replace the struct — replacing Storage
+		// wholesale discarded minimalConfig's (now required) declared store.
+		// The prefix assertion under test is unchanged.
+		cfg.Storage.RedisKeyPrefix = p
 		q, err := Setup(context.Background(), Options{ConfigOverride: cfg})
 		if err != nil {
 			t.Fatalf("prefix %q should be accepted, got: %v", p, err)

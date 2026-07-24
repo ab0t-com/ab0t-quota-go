@@ -32,8 +32,10 @@ func TestLoadFullWithEnvInterpolation(t *testing.T) {
 	if c.ServiceName != "from-env" {
 		t.Errorf("env interpolation failed: %q", c.ServiceName)
 	}
-	if c.Storage.RedisURL != "redis://test:6379/1" {
-		t.Errorf("redis interpolation: %q", c.Storage.RedisURL)
+	// T-G1 mechanical re-spell (RedisURL is now Declared[string]); the
+	// asserted value is unchanged.
+	if v, ok := c.Storage.RedisURL.Get(); !ok || v != "redis://test:6379/1" {
+		t.Errorf("redis interpolation: %q (declared=%v)", v, ok)
 	}
 	if c.Storage.DynamoDBTable != "test_table" {
 		t.Errorf("ddb table: %q", c.Storage.DynamoDBTable)
