@@ -3,14 +3,11 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
-## [v0.1.5] — declared, not discovered (pack 20260721)
+## [v0.1.5] — declared, not discovered
 
-**⚠️ Breaking, action-required — shipped as a PATCH by operator decision**, matching
-its Python sibling (`ab0t-quota` 0.6.3). The policy sentence above would call for a
-MINOR; the operator owns publishing and chose patch, consistent with standing practice
-for these libraries. **The version number is therefore not a reliable breakage signal
-for this release — the migration notes below are.** Go's version lives in the git tag
-(`RELEASE.md`: "there is no version file to edit"), so the operator tags `v0.1.5`.
+**⚠️ Breaking, action-required — shipped as a PATCH**, matching its Python sibling
+(`ab0t-quota` 0.6.3). **The version number is not a reliable breakage signal for
+this release — the migration notes below are.** Read them before upgrading.
 
 ### ⚠️ Action required — migration notes
 
@@ -18,20 +15,17 @@ for this release — the migration notes below are.** Go's version lives in the 
    `storage.redis_url` absent/null with no `QUOTA_REDIS_URL` was silently an
    in-memory, per-process counter; now it is a typed startup error. For
    single-process dev, declare it: `"redis_url": "memory://"`.
-2. **A DECLARED but unreachable Redis now RETRIES then REFUSES (D-2) —
+2. **A DECLARED but unreachable Redis now RETRIES then REFUSES —
    it no longer silently degrades to in-memory.** Boot retries the
    *unreachable* kind for up to `storage.connect_retry_seconds` (default 30;
    `0` = fail immediately), then refuses with a typed reachability error.
    Authentication failures refuse immediately — retrying a wrong password is
    just a slower wrong password. Previously the process served with counters
-   local to each replica **and reported healthy** (GO-10): every replica
+   local to each replica **and reported healthy**: every replica
    admitted the full limit and a restart zeroed usage. If your service now
    refuses at boot, it was previously serving unmetered — the refusal is the
-   fix working. Blast radius, measured: one code branch; zero tests and zero
-   documented behaviours relied on the degrade
-   (`tickets/…/information_go_availability_20260721.md`).
-   Runtime is unchanged: a Redis that fails AFTER boot still degrades
-   loud-not-fatal (D-75).
+   fix working. Runtime is unchanged: a Redis that fails AFTER boot still
+   degrades loud-not-fatal.
 3. **Invented AWS regions removed** (us-west-2/us-east-1): declare
    `storage.dynamodb_region` / `outbox.sns_region` or let the platform's
    `AWS_REGION` resolve via the SDK; nothing resolving is QUOTA-CFG-009/010.
