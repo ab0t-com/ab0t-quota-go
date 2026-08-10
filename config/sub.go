@@ -127,6 +127,12 @@ type AlertsConfig struct {
 	WebhookURL        string  `json:"webhook_url,omitempty"`
 	WarningThreshold  float64 `json:"warning_threshold,omitempty"`  // default 0.80
 	CriticalThreshold float64 `json:"critical_threshold,omitempty"` // default 0.95
+	// DriftSustainedThreshold (ticket 20260810, P4.1) — how many CONSECUTIVE
+	// reconcile re-heals of the same (org, resource) with no intervening
+	// resolve raise a distinct CRITICAL `quota_drift_sustained` alert. A single
+	// heal is normal; RECURRING drift is the signature of a live collision bug
+	// (the feedback loop whose absence let this class recur). Default 3.
+	DriftSustainedThreshold int `json:"drift_sustained_threshold,omitempty"`
 }
 
 // TierProviderConfig selects which provider strategy to use.

@@ -62,6 +62,12 @@ type Reconciler struct {
 	Reg      *registry.Registry
 	Provider ObservedUsageProvider // nil ⇒ ledger-only
 	OnDrift  func(DriftAlert)      // wire to alerts (money incident)
+	// OnClean fires for each GAUGE (org, resource) found already at the
+	// authoritative level (no drift) — the resolve signal for the drift-metric
+	// feedback loop (ticket 20260810, P4.1). nil ⇒ no resolve signal. The sink
+	// no-ops for a (org, resource) that was never drifting, so this is cheap to
+	// call every pass.
+	OnClean func(orgID, resourceKey string)
 	// Preflight (D-75) RE-VERIFIES the library's infrastructure invariants once per loop
 	// pass — Redis topology / eviction policy / scripting / version / headroom, and the DDB
 	// tables. It rides THIS loop deliberately: a new worker is one more thing that can be
@@ -203,6 +209,9 @@ func (r *Reconciler) ReconcileOrg(ctx context.Context, orgID string) ([]DriftAle
 		pair := g.OrgKeyPair(orgID)
 		cur, _, _ := counters.GetFloatDual(ctx, r.Factory.Floats, pair)
 		if cur == target && unsettleable == 0 {
+			if r.OnClean != nil {
+				r.OnClean(orgID, rk) // resolve signal (P4.1); no-ops if never drifted
+			}
 			continue // no drift, nothing to alert
 		}
 		// Force-set the cache to the authoritative level; log which source won.

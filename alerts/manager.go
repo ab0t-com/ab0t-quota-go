@@ -24,8 +24,20 @@ type Manager struct {
 	Cfg        config.AlertsConfig
 	Dispatcher Dispatcher
 
+	// MetricSinks receive numeric drift metrics on EVERY reconcile heal —
+	// never cooldown-gated (ticket 20260810, P4.1). Distinct from Dispatcher
+	// (human alerts). nil/empty ⇒ no metric emission. Set by Setup.
+	MetricSinks []MetricSink
+	// DriftSustainedThreshold: N consecutive re-heals of the same (org,
+	// resource) with no intervening resolve fire a CRITICAL quota_drift_sustained
+	// alert. Default 3 (set in NewManager).
+	DriftSustainedThreshold int
+
 	mu       sync.Mutex
 	lastSent map[string]time.Time
+	// driftSustained counts consecutive drift_detected per (org:resource) with
+	// no intervening resolve — the recurring-drift signal.
+	driftSustained map[string]int
 }
 
 // Dispatcher writes an alert somewhere.
@@ -53,7 +65,16 @@ func NewManager(cfg config.AlertsConfig, d Dispatcher) *Manager {
 	if cfg.CriticalThreshold == 0 {
 		cfg.CriticalThreshold = 0.95
 	}
-	return &Manager{Cfg: cfg, Dispatcher: d, lastSent: map[string]time.Time{}}
+	threshold := cfg.DriftSustainedThreshold
+	if threshold <= 0 {
+		threshold = 3
+	}
+	return &Manager{
+		Cfg: cfg, Dispatcher: d,
+		DriftSustainedThreshold: threshold,
+		lastSent:                map[string]time.Time{},
+		driftSustained:          map[string]int{},
+	}
 }
 
 // Notify dispatches an alert if cooldown allows. Idempotent under bursts.
@@ -141,6 +162,78 @@ func (m *Manager) NotifyDrift(ctx context.Context, orgID, resourceKey, source st
 	m.mu.Unlock()
 	_ = m.Dispatcher.Send(ctx, level, engine.Result{Resource: resourceKey, Reason: "drift_" + source,
 		Message: "reconciler converged " + resourceKey + " (source=" + source + ")"})
+}
+
+// RecordDrift emits the scrapeable `quota.drift_detected` METRIC on EVERY
+// reconcile heal (ticket 20260810, P4.1) — never cooldown-gated, unlike the
+// paired NotifyDrift human alert — and tracks consecutive re-heals per (org,
+// resource). Once DriftSustainedThreshold consecutive re-heals with no
+// intervening resolve occur, it raises a distinct CRITICAL
+// `quota_drift_sustained` alert: a single heal is normal, RECURRING drift is
+// the live-collision signature this ticket's observability feedback loop
+// exists to surface. The metric fires whenever MetricSinks are configured,
+// independent of Cfg.Enabled (a metric is not a page); the sustained alert
+// rides the normal Dispatcher/cooldown path.
+func (m *Manager) RecordDrift(ctx context.Context, orgID, resourceKey, source string, counterBefore, counterAfter float64) {
+	metric := Metric{
+		Name: MetricDriftDetected, OrgID: orgID, ResourceKey: resourceKey,
+		CounterBefore: counterBefore, CounterAfter: counterAfter,
+		Delta: counterAfter - counterBefore, Source: source,
+	}
+	for _, s := range m.MetricSinks {
+		s.Emit(ctx, metric)
+	}
+	key := orgID + ":" + resourceKey
+	m.mu.Lock()
+	m.driftSustained[key]++
+	n := m.driftSustained[key]
+	m.mu.Unlock()
+
+	if n < m.DriftSustainedThreshold || !m.Cfg.Enabled || m.Dispatcher == nil {
+		return
+	}
+	// Sustained drift → a CRITICAL alert, cooldown-keyed so a persistent drift
+	// storm dedups to one page per cooldown window but a NEW sustained pair is
+	// not suppressed by a prior one.
+	alertKey := "drift_sustained:" + key
+	m.mu.Lock()
+	last, seen := m.lastSent[alertKey]
+	if seen && time.Since(last) < time.Duration(m.Cfg.CooldownSeconds)*time.Second {
+		m.mu.Unlock()
+		return
+	}
+	m.lastSent[alertKey] = time.Now()
+	m.mu.Unlock()
+	_ = m.Dispatcher.Send(ctx, LevelCritical, engine.Result{
+		Resource: resourceKey, Reason: "drift_sustained",
+		Message: "quota_drift_sustained org=" + orgID + " resource=" + resourceKey +
+			" source=" + source + " — this (org,resource) has RE-drifted on consecutive reconcile passes; " +
+			"a single heal is normal, RECURRING drift is the signature of a live collision bug. Investigate.",
+	})
+}
+
+// RecordDriftResolved emits the paired `quota.drift_resolved` METRIC and clears
+// the sustained counter — but ONLY when the (org, resource) was actually
+// sustaining drift (>0). A perpetually-healthy resource produces no metric and
+// no noise (parity with Python's resolved-only-when-was-active semantics).
+func (m *Manager) RecordDriftResolved(ctx context.Context, orgID, resourceKey string) {
+	key := orgID + ":" + resourceKey
+	m.mu.Lock()
+	was := m.driftSustained[key]
+	if was > 0 {
+		delete(m.driftSustained, key)
+	}
+	m.mu.Unlock()
+	if was == 0 {
+		return // never drifted — no resolve signal (no noise)
+	}
+	metric := Metric{
+		Name: MetricDriftResolved, OrgID: orgID, ResourceKey: resourceKey,
+		CounterBefore: 0, CounterAfter: 0, Delta: 0, Source: "resolved",
+	}
+	for _, s := range m.MetricSinks {
+		s.Emit(ctx, metric)
+	}
 }
 
 // NotifyVoid is the sink for outbox past-horizon/undeliverable settlement voids

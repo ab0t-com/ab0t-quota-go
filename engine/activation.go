@@ -192,6 +192,18 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 		specs[i] = g.spec
 	}
 	hasIdem := in.IdempotencyKey != ""
+	// P1.5 (ticket 20260810) — the idempotency-key contract guard. A caller
+	// keying on a bare recyclable id (no generation/:evt:/uuid/opaque-token
+	// component) is the exact stuck-gauge collision shape: warm-pool reuse
+	// makes a genuinely NEW activation compute the SAME key as a past one, so
+	// the atomic claim treats it as a duplicate and the spend is dropped (an
+	// undercount → phantom headroom). WARN by default; hard error under
+	// AB0T_QUOTA_STRICT_IDEMPOTENCY_KEYS=1. The library's own release path is
+	// keyed on a minted activation_id (never a caller key), so this only ever
+	// judges consumer-supplied keys.
+	if err := counters.GuardIdempotencyKey(in.IdempotencyKey); err != nil {
+		return AcquireResult{}, err
+	}
 	// idem key shares the first gauge's namespace (Python: specs[0] gauge).
 	idemPair := e.Factory.Gauge(gs[0].rk).IdemKeyPair(in.OrgID, in.IdempotencyKey)
 	idemKey := idemPair.P

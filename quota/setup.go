@@ -511,6 +511,15 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			}
 		}
 		q.Alerts = alerts.NewManager(cfg.Alerts, dispatcher)
+		// P4.1 (ticket 20260810): wire drift-METRIC sinks. A structured log line
+		// always (grep/scrape-able), plus the zero-infrastructure scrapeable
+		// Redis counters when a Redis is present — so a Go consumer's drift is
+		// graphable, not just a cooldown-gated alert. These emit on EVERY heal.
+		metricSinks := []alerts.MetricSink{alerts.LogMetricSink{}}
+		if redisClient != nil {
+			metricSinks = append(metricSinks, alerts.NewRedisCounterMetricSink(redisClient, ""))
+		}
+		q.Alerts.MetricSinks = metricSinks
 		cap.Alerts = true
 		// D-26: subscribe the engine's over-admission events to the alert
 		// manager. Dependency inverted — the engine publishes to OnEvent (a
@@ -897,6 +906,16 @@ func (q *Quota) wireReconciler(cfg *config.Config, opts Options, cap *Capabiliti
 		am := q.Alerts
 		r.OnDrift = func(a reconcile.DriftAlert) { // (e) money incident → alert sink
 			am.NotifyDrift(context.Background(), a.OrgID, a.ResourceKey, a.Source, a.UnsettleableLive)
+			// P4.1: a real convergence (source activations|provider) is a
+			// drift_detected metric + sustained tracking. provider_unreachable/
+			// provider_absent are their OWN alerts, not a healed drift — skip.
+			switch a.Source {
+			case "activations", "provider":
+				am.RecordDrift(context.Background(), a.OrgID, a.ResourceKey, a.Source, a.CounterWas, a.ConvergedTo)
+			}
+		}
+		r.OnClean = func(orgID, resourceKey string) { // P4.1: the resolve signal
+			am.RecordDriftResolved(context.Background(), orgID, resourceKey)
 		}
 	}
 	// D-75 — the periodic re-verification RIDES this loop (never its own worker: one more

@@ -46,6 +46,14 @@ var censusBuildHome = map[string]bool{
 // Justified exemptions (D-KS-11): fixed synthetic probe keys / TOOL patterns.
 var censusExemptFiles = map[string]string{
 	"quota/topology.go": "D-71 data-plane probe pair {foo}/{bar} — fixed synthetic keys (spec §7 row 15)",
+	// P4.1 (ticket 20260810): the drift-metric OBSERVABILITY namespace
+	// `quota:metrics:*` is NOT a counter key — it is a scrapeable metrics
+	// counter an operator reads with GET (parity with Python alerts.py, which
+	// allowlisted its own `quota.*` metric namespace in _LIBRARY_VOCABULARY).
+	// It carries no spend, never migrates with the counter keyspace, and is
+	// built only in this alerts-only file — so it cannot become a straggler
+	// COUNTER writer (the risk R1 guards).
+	"alerts/metric_redis.go": "P4.1 drift-metric observability namespace quota:metrics:* — scrapeable counters, not counter keys (Python parity)",
 }
 
 // The five pre-P5.3 builder files — the ONLY legal DeprecatedScopeKey callers.
