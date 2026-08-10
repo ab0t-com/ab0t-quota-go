@@ -102,6 +102,63 @@ func main() {
 }
 ```
 
+### 3. Keep usage correct — wire a truth source
+
+The Redis counter is a **cache**, never the authority. Each resource declares a
+`counter_type`, and the engine reconciles the cache against that type's **source of
+truth**. Wiring the truth source is **purely additive** — wire neither provider and the
+engine behaves exactly as before.
+
+| Counter type | Source of truth | Provider on `quota.Options` |
+|---|---|---|
+| **Gauge** (concurrency / live level) | a **live count** of what exists right now | `ObservedUsageProvider func(ctx, orgID) (map[string]int, error)` |
+| **Accumulator** (metered spend) | a **re-sum of your durable event ledger** for the current period (the past is real) | `AccumulatorUsageProvider func(ctx, orgID) (map[string]float64, error)` |
+| **Rate** (windowed) | the TTL'd window **is** truth (self-heals) | none |
+
+```go
+q, err := quota.Setup(ctx, quota.Options{
+    ConfigPath:               "quota-config.json",
+    ObservedUsageProvider:    countLiveResources,  // GAUGE truth (live existence)
+    AccumulatorUsageProvider: sumPeriodLedger,     // ACCUMULATOR truth (ledger re-sum)
+    // ReconcileOrgs enumerates orgs for the BACKGROUND reconciler loop (optional).
+    ReconcileOrgs: func() []string { return activeOrgIDs() },
+})
+```
+
+Both providers return **only the keys they can observe** — a missing key means "no
+observation", never an affirmative zero (absence never wipes a counter). Setup bounds each
+call at `ProviderTimeout` (10s) and throttles read-repair at `ReadRepairThrottle` (60s).
+
+What you get:
+
+- **Recount-before-deny** — a would-be denial is re-checked against truth first, so a
+  gauge stuck high from a lost decrement never wrongly blocks a user. On a truth-source
+  outage the fail direction is **type-aware**: **gauge fails OPEN** (a stale gauge must
+  never block; `reason=recount_fail_open`), **accumulator KEEPS the deny**
+  (`reason=recount_source_unavailable_kept_deny` — a ledger-backed meter must never let
+  spend blow past the cap), **rate unchanged**.
+- **Read-repair** — `q.Engine.MaybeReadRepair(ctx, orgID)` from your usage/status handler
+  repairs a drifted cache opportunistically (throttled, never errors).
+- **Recalculate button** — `q.Engine.ReconcileOrg(ctx, orgID, "")` recomputes **every**
+  resource (pass a `resourceKey` for one) from its truth, repairs the counter, and returns
+  a `ReconcileReport`. Idempotent and safe anytime — wire it behind an endpoint like
+  `POST /api/quotas/recalculate`.
+
+```go
+report, err := q.Engine.ReconcileOrg(ctx, orgID, "")   // "" = all resources
+// report.Resources["widget.concurrent"]    -> {CounterType:"gauge",       Before:5, After:0,  Changed:true,  Source:"provider", Status:"repaired"}
+// report.Resources["widget.monthly_cost"]  -> {CounterType:"accumulator", Before:42,After:42, Changed:false, Source:"ledger",   Status:"in_sync"}
+// report.Resources["api.requests_per_hour"]-> {CounterType:"rate", Status:"skipped_rate"}
+```
+
+Per-resource `Status`: `repaired` | `in_sync` | `skipped_rate` | `no_truth_source` |
+`no_observation` | `truth_unavailable`.
+
+**If a number ever looks wrong:** it self-heals on the next read or denial; force it with
+`ReconcileOrg` (or the Recalculate button). **Never hand-edit the Redis counter** — the
+next reconcile overwrites it and it bypasses the `quota.drift_detected{org, resource, type,
+delta}` metric that fires on every repair.
+
 ### How the Go module proxy + GitHub work together
 
 When you run `go get`, the Go toolchain does this:

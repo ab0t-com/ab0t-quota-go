@@ -126,6 +126,45 @@ in a single typed JSON file (`quota-config.json`); see the bundled
 [`testdata/quota-config.example.json`](testdata/quota-config.example.json)
 for the schema.
 
+## Keeping usage correct (self-healing counters)
+
+The Redis counter is a **cache**, never the authority. Each resource declares a
+`counter_type`, and the engine reconciles the cache against that type's **source of
+truth**. Wiring the truth source is **purely additive** — wire neither provider and
+behaviour is exactly as before.
+
+| Counter type | Source of truth | Provider on `quota.Options` |
+|---|---|---|
+| **Gauge** (concurrency / live level) | a **live count** of what exists now | `ObservedUsageProvider func(ctx, orgID) (map[string]int, error)` |
+| **Accumulator** (metered spend) | a **re-sum of your durable event ledger** for the current period (the past is real) | `AccumulatorUsageProvider func(ctx, orgID) (map[string]float64, error)` |
+| **Rate** (windowed) | the TTL'd window **is** truth (self-heals) | none |
+
+```go
+q, _ := quota.Setup(ctx, quota.Options{
+    ConfigPath:               "quota-config.json",
+    ObservedUsageProvider:    countLiveResources,  // GAUGE truth
+    AccumulatorUsageProvider: sumPeriodLedger,     // ACCUMULATOR truth
+})
+```
+
+- **Recount-before-deny** — a would-be denial is re-checked against truth first, so a
+  gauge stuck high from a lost decrement never wrongly blocks a user. On a truth-source
+  outage the fail direction is **type-aware**: a **gauge fails OPEN** (a stale gauge must
+  never block), an **accumulator KEEPS the deny** (a ledger-backed meter must never let
+  spend blow past the cap), **rate is unchanged**.
+- **Read-repair** — `q.Engine.MaybeReadRepair(ctx, orgID)` in your usage/status handler
+  repairs a drifted cache opportunistically (throttled, never errors).
+- **Recalculate button** — `q.Engine.ReconcileOrg(ctx, orgID, "")` recomputes every
+  resource from its truth (pass a `resourceKey` for one), repairs the counter, and returns
+  a `ReconcileReport` of per-resource before→after. Idempotent and safe anytime — wire it
+  behind `POST /api/quotas/recalculate`.
+
+**If a number ever looks wrong:** it self-heals on the next read or denial; force it with
+`ReconcileOrg` (or the Recalculate button). **Never hand-edit the Redis counter** — the
+next reconcile overwrites it and it bypasses the `quota.drift_detected` metric that fires
+on every repair. See [CONSUMING.md](CONSUMING.md#3-keep-usage-correct--wire-a-truth-source)
+for the full contract and `Status` values.
+
 ## Idempotency for handlers that touch money
 
 For handlers with **side effects on money or persistent state**, use

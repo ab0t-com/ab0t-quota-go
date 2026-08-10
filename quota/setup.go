@@ -90,8 +90,18 @@ type Options struct {
 	SettlementPublisher outbox.Publisher
 
 	// ObservedUsageProvider is the consumer's product-state truth (EXISTENCE)
-	// for the reconciler (D-33). nil ⇒ ledger-only reconciliation.
+	// for the reconciler (D-33) AND the engine's gauge recount-before-deny /
+	// read-repair / ReconcileOrg (ticket 20260810). nil ⇒ ledger-only
+	// reconciliation and no gauge recount.
 	ObservedUsageProvider reconcile.ObservedUsageProvider
+
+	// AccumulatorUsageProvider is the ACCUMULATOR (meter) truth seam (ticket
+	// 20260810): fn(org) -> {resource_key: period_sum} that RE-SUMS the consumer's
+	// DURABLE event ledger for the CURRENT period (NOT a live count — a meter's
+	// past is real). Wired into the engine so recount-before-deny / ReconcileOrg /
+	// read-repair verify an accumulator denial against the ledger, not the cached
+	// running total. nil ⇒ accumulators are not recounted.
+	AccumulatorUsageProvider func(ctx context.Context, orgID string) (map[string]float64, error)
 
 	// ReconcileOrgs supplies the orgs to reconcile each pass (the library can't
 	// enumerate them). nil ⇒ the reconciler is NOT started (Capabilities says why).
@@ -443,6 +453,14 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		Provider: prov,
 		Factory:  factory,
 		Messages: q.Messages,
+		// Ticket 20260810 — the typed truth-source seams. The engine dispatches
+		// recount-before-deny / read-repair / ReconcileOrg on counter_type:
+		// GAUGE→ObservedUsage, ACCUMULATOR→AccumulatorUsage. Both nil = zero-config
+		// default (no recount), so this is purely additive.
+		ObservedUsage:      opts.ObservedUsageProvider,
+		AccumulatorUsage:   opts.AccumulatorUsageProvider,
+		ProviderTimeout:    10 * time.Second,
+		ReadRepairThrottle: 60 * time.Second,
 	}
 	if redisClient != nil {
 		q.closeFns = append(q.closeFns, redisClient.Close)
@@ -529,6 +547,21 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		am := q.Alerts
 		q.Engine.OnEvent = func(ctx context.Context, ev engine.QuotaEvent) {
 			am.NotifyQuotaEvent(ctx, ev)
+		}
+		// Ticket 20260810 (Phase 3): the engine's recount-before-deny / ReconcileOrg
+		// / read-repair drift → the same manager the reconciler uses. A real heal
+		// (source provider|ledger|activations) emits the typed quota.drift_detected
+		// metric + sustained tracking; provider_unreachable is its own alert (a
+		// fail-open, not a healed drift), not a metric.
+		q.Engine.OnDrift = func(ctx context.Context, d engine.DriftInfo) {
+			am.NotifyDrift(ctx, d.OrgID, d.ResourceKey, d.Source, 0)
+			switch d.Source {
+			case "provider", "ledger", "activations":
+				am.RecordDriftTyped(ctx, d.OrgID, d.ResourceKey, d.Source, d.ResourceType, d.Before, d.After)
+			}
+		}
+		q.Engine.OnDriftResolved = func(ctx context.Context, orgID, resourceKey string) {
+			am.RecordDriftResolved(ctx, orgID, resourceKey)
 		}
 	} else {
 		cap.WhyOff["alerts"] = "config.alerts.enabled = false"

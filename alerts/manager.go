@@ -175,8 +175,17 @@ func (m *Manager) NotifyDrift(ctx context.Context, orgID, resourceKey, source st
 // independent of Cfg.Enabled (a metric is not a page); the sustained alert
 // rides the normal Dispatcher/cooldown path.
 func (m *Manager) RecordDrift(ctx context.Context, orgID, resourceKey, source string, counterBefore, counterAfter float64) {
+	m.RecordDriftTyped(ctx, orgID, resourceKey, source, "", counterBefore, counterAfter)
+}
+
+// RecordDriftTyped is RecordDrift plus the resource's counter TYPE — the `type`
+// label in the drift metric contract quota.drift_detected{org,resource,type,delta}
+// (ticket 20260810, Phase 3). RecordDrift delegates here with an empty type for
+// callers (the gauge-only reconciler) that don't carry one.
+func (m *Manager) RecordDriftTyped(ctx context.Context, orgID, resourceKey, source, resourceType string, counterBefore, counterAfter float64) {
 	metric := Metric{
 		Name: MetricDriftDetected, OrgID: orgID, ResourceKey: resourceKey,
+		ResourceType:  resourceType,
 		CounterBefore: counterBefore, CounterAfter: counterAfter,
 		Delta: counterAfter - counterBefore, Source: source,
 	}

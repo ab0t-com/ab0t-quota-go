@@ -22,10 +22,11 @@ type Metric struct {
 	Name          string // "quota.drift_detected" | "quota.drift_resolved"
 	OrgID         string
 	ResourceKey   string
+	ResourceType  string // "gauge" | "accumulator" | "" — the `type` label (ticket 20260810 Phase 3)
 	CounterBefore float64
 	CounterAfter  float64
 	Delta         float64 // CounterAfter - CounterBefore (0.0 for resolved)
-	Source        string  // which source won: activations | provider | provider_unreachable | provider_absent
+	Source        string  // which source won: activations | provider | ledger | provider_unreachable | provider_absent
 }
 
 // Metric name constants.
@@ -54,6 +55,7 @@ func (LogMetricSink) Emit(_ context.Context, m Metric) {
 		"name", m.Name,
 		"org_id", m.OrgID,
 		"resource_key", m.ResourceKey,
+		"type", m.ResourceType,
 		"counter_before", m.CounterBefore,
 		"counter_after", m.CounterAfter,
 		"delta", m.Delta,

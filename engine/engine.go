@@ -57,6 +57,55 @@ type Engine struct {
 	// headroom (the 20260626 production incident).
 	touchMu sync.Mutex
 	touches map[string]time.Time
+
+	// --- Typed truth-source seams (ticket 20260810 — robust self-correcting
+	// quota, Go parity with the Python engine). The fast Redis counter is a
+	// CACHE of a type-specific derived truth; two user-safety rules
+	// (recount-before-deny, read-repair) recompute that truth before harming a
+	// user. Dispatched on counter_type:
+	//   * GAUGE       → ObservedUsage(org) → {resource_key: live_count}   (EXISTENCE)
+	//   * ACCUMULATOR → AccumulatorUsage(org) → {resource_key: period_sum} (durable
+	//                   ledger re-sum for the CURRENT period; NOT a live count)
+	//   * RATE        → no recount (the TTL'd window counter is already truth)
+	// Both nil ⇒ zero-config default: no recount, no read-repair — behaviour is
+	// byte-identical to a consumer that wires neither (purely additive).
+	//
+	// NOTE (parity gap): ObservedUsage is org-total-only (map[string]int), matching
+	// reconcile.ObservedUsageProvider — it carries no per-user shape, so the engine
+	// recounts/repairs the ORG-level gauge only. A per-user denial keeps its
+	// cache-based decision (same limitation the Go reconciler has).
+	ObservedUsage    func(ctx context.Context, orgID string) (map[string]int, error)
+	AccumulatorUsage func(ctx context.Context, orgID string) (map[string]float64, error)
+	// ProviderTimeout bounds a truth provider call (D-52). 0 ⇒ unbounded.
+	ProviderTimeout time.Duration
+	// ReadRepairThrottle is the per-org minimum gap between opportunistic
+	// read-repairs (P2.2). 0 ⇒ repair on every MaybeReadRepair call.
+	ReadRepairThrottle time.Duration
+
+	// OnDrift / OnDriftResolved are the dependency-inverted drift-observability
+	// hooks (same pattern as OnEvent — the engine never imports alerts). setup
+	// wires them to alerts.Manager.RecordDriftTyped / RecordDriftResolved so
+	// recount-before-deny / ReconcileOrg / read-repair emit quota.drift_detected
+	// {org,resource,type,delta}. nil ⇒ a structured log line still fires.
+	OnDrift         func(ctx context.Context, d DriftInfo)
+	OnDriftResolved func(ctx context.Context, orgID, resourceKey string)
+
+	// read-repair throttle state (per-process, best-effort — a repair once per
+	// window per replica is fine; correctness comes from the periodic reconciler).
+	rrMu   sync.Mutex
+	rrLast map[string]time.Time
+}
+
+// DriftInfo is the payload of the engine's drift-observability hook (ticket
+// 20260810). Source is which layer won ("provider" for a gauge, "ledger" for an
+// accumulator, "provider_unreachable" on a fail-open).
+type DriftInfo struct {
+	OrgID        string
+	ResourceKey  string
+	Source       string
+	ResourceType string // "gauge" | "accumulator"
+	Before       float64
+	After        float64
 }
 
 func (e *Engine) recordTouch(org, rk string) {
@@ -229,14 +278,46 @@ func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
 		}
 	}
 
-	// Decision math.
+	// Decision math (extracted so recount-before-deny can re-decide with a
+	// recomputed usage without duplicating the tiering — ticket 20260810).
+	result := e.decideOrg(in.ResourceKey, tierID, res, tier, limit, used, in.Cost)
+
+	// P1 — RECOUNT-BEFORE-DENY (ticket 20260810, the highest-impact rule). Never
+	// block a user on a stale cached number: when the cache would DENY, recompute
+	// the true usage from the resource's TYPE source of truth and only deny if the
+	// truth is really at/over limit; otherwise repair the cache and re-decide.
+	// Fail-OPEN on a truth-source error (D-31). RATE and consumers with no truth
+	// source configured are unaffected.
+	if result.Decision == Deny {
+		result = e.recountBeforeDeny(ctx, in, res, tier, limit, tierID, used, result)
+	}
+
+	// Shadow mode — convert a (possibly recounted) Deny to ShadowAllow.
+	if result.Decision == Deny && e.Cfg != nil && e.Cfg.Enforcement.ShadowMode {
+		result.Decision = ShadowAllow
+		result.Reason = "shadow_would_deny"
+		result.Message = e.Messages.ShadowAllowed(messages.Vars{
+			Resource: in.ResourceKey, Limit: ftoa(*limit.Limit), Used: ftoa(result.Used),
+		})
+	}
+
+	return result, nil
+}
+
+// decideOrg runs the org-level decision math for a resolved (tier, limit) and a
+// given `used`. Extracted from Check so recount-before-deny can re-decide with a
+// recomputed usage through the SAME tiering (one home for the classification).
+func (e *Engine) decideOrg(
+	resourceKey, tierID string, res config.ResourceDef, tier config.Tier,
+	limit config.TierLimit, used, cost float64,
+) Result {
 	cap := *limit.Limit
 	burst := limit.BurstAllowance
-	proposed := used + in.Cost
+	proposed := used + cost
 	hard := cap + burst
 
 	result := Result{
-		Resource:   in.ResourceKey,
+		Resource:   resourceKey,
 		TierID:     tierID,
 		Used:       used,
 		Limit:      limit.Limit,
@@ -252,7 +333,7 @@ func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
 		result.Decision = Deny
 		result.Reason = "exceeded"
 		result.Message = e.Messages.Denied(messages.Vars{
-			Resource: in.ResourceKey, Limit: ftoa(cap), Used: ftoa(used),
+			Resource: resourceKey, Limit: ftoa(cap), Used: ftoa(used),
 			Tier: tierID, UpgradeURL: tier.UpgradeURL,
 		})
 	case proposed > cap:
@@ -261,37 +342,27 @@ func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
 		result.Reason = "burst_consumed"
 		result.Warning = true
 		result.Message = e.Messages.OverBurst(messages.Vars{
-			Resource: in.ResourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
+			Resource: resourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
 		})
 	case limit.CriticalThreshold > 0 && result.Threshold >= limit.CriticalThreshold:
 		result.Decision = Critical
 		result.Reason = "near_critical"
 		result.Critical = true
 		result.Message = e.Messages.Critical(messages.Vars{
-			Resource: in.ResourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
+			Resource: resourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
 		})
 	case limit.WarningThreshold > 0 && result.Threshold >= limit.WarningThreshold:
 		result.Decision = Warn
 		result.Reason = "near_warning"
 		result.Warning = true
 		result.Message = e.Messages.Warning(messages.Vars{
-			Resource: in.ResourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
+			Resource: resourceKey, Limit: ftoa(cap), Used: ftoa(used), Tier: tierID,
 		})
 	default:
 		result.Decision = Allow
 		result.Reason = "under_limit"
 	}
-
-	// Shadow mode — convert Deny to ShadowAllow.
-	if result.Decision == Deny && e.Cfg.Enforcement.ShadowMode {
-		result.Decision = ShadowAllow
-		result.Reason = "shadow_would_deny"
-		result.Message = e.Messages.ShadowAllowed(messages.Vars{
-			Resource: in.ResourceKey, Limit: ftoa(cap), Used: ftoa(used),
-		})
-	}
-
-	return result, nil
+	return result
 }
 
 // Spend applies the cost after Check returned an Allow-ish decision. The

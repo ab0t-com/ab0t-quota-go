@@ -129,10 +129,23 @@ Wire (see `ab0t-quota-go-setup` / `-middleware` / `-auth-events`):
 q, _ := quota.Setup(ctx, quota.Options{
     ConfigPath:    "quota-config.json",              // tier/limits/credit-grant schema (ab0t-quota-go-config)
     CreditGranter: myGranter{billing: billingClient},// grants credits on auth events, idempotently
+    // Truth sources (purely additive; omit and behaviour is unchanged):
+    //   GAUGE       → live existence count      ACCUMULATOR → durable-ledger period re-sum
+    ObservedUsageProvider:    countLiveResources, // func(ctx, org) (map[string]int, error)
+    AccumulatorUsageProvider: sumPeriodLedger,    // func(ctx, org) (map[string]float64, error)
 })
 mux.Handle("/api/", q.Middleware(deps)(handler))                        // per-request quota enforcement → 429
 mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())   // receives auth/billing events
+// Recalculate button: recompute every counter from its type truth, repair, return before→after.
+mux.HandleFunc("/api/quotas/recalculate", func(w http.ResponseWriter, r *http.Request) {
+    rep, _ := q.Engine.ReconcileOrg(r.Context(), orgFrom(r), "")   // "" = all resources; idempotent
+    json.NewEncoder(w).Encode(rep)
+})
 ```
+Wiring the providers makes admission **recount-before-deny** (a gauge stuck high never
+wrongly blocks; an accumulator keeps the deny on a ledger outage so spend can't blow past
+the cap) and usage reads **self-heal**. See the `ab0t-quota-go-middleware` / `-design`
+skills and `CONSUMING.md`. **Never hand-edit a Redis counter — call `ReconcileOrg`.**
 
 ### 6b — Python service → drop-in clients (connect is Python)
 Follow `billing-payment-integration`: `app/billing_client.py` + `app/payment_client.py` send `X-API-Key`; add the proxy routes (`/api/payments/plans|checkout|topup|portal`, `/api/webhooks/stripe`). Connect already does this for billing (`app/dependencies.py`, `app/api/proxy.py`); add the payment client symmetrically.
@@ -144,6 +157,7 @@ Follow `billing-payment-integration`: `app/billing_client.py` + `app/payment_cli
 - **Checkout**: `POST /api/payments/checkout/{plan}` → returns a Stripe URL.
 - **Webhook loop**: complete a test checkout (Stripe test mode) → `invoice.paid`/`checkout.session.completed` → payment-svc credits billing → balance/tier updates.
 - **No 401/403** on proxied billing/payment calls (401 = missing/expired key; 403 = missing `cross_tenant`/`cross_org`).
+- **Recalculate**: `POST /api/quotas/recalculate` (or `q.Engine.ReconcileOrg`) → 200 with a per-resource before→after report; a drifted counter comes back to truth (`status:"repaired"`).
 - Register the Stripe webhook URL + events per `billing-payment-integration`.
 
 ---

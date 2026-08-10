@@ -3,6 +3,29 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [v0.1.7] — Recount-before-deny, read-repair, and one-call recalculate
+
+Go parity with `ab0t-quota` (Python). Non-breaking and purely additive.
+
+- **Recount-before-deny** in `Engine.Check` (and the `Acquire` twin): a would-be
+  deny first recomputes the true usage from the resource's *type* source — a
+  **gauge** from `Engine.ObservedUsage` (live count), a **meter/accumulator** from
+  `Engine.AccumulatorUsage` (durable period-ledger sum) — repairs a drifted
+  counter, and only denies if the truth is really over.
+- **Type-aware fail direction** on a truth-source outage (money-safety): a gauge
+  fails *open*; a meter keeps the last-known deny (no overspend past the cap).
+  Both alert.
+- **`Engine.ReconcileOrg(org, resourceKey?)`** returns a structured before→after
+  `ReconcileReport`; **`Engine.MaybeReadRepair`** is the throttled read-repair
+  hook. Idempotent, safe anytime — powers a "Recalculate usage" button.
+- **Detection**: engine drift routes to `alerts.Manager`, and the drift metric
+  gained a `type` label (`Metric.ResourceType` / `RecordDriftTyped`).
+
+Wire `ObservedUsageProvider` / `AccumulatorUsageProvider` into `quota.Setup` to
+opt in; a service that wires neither behaves exactly as before. (Documented gap:
+the observed-usage provider is org-total-only, so recount/repair operate at the
+org level; a per-user denial keeps its cache decision.)
+
 ## [v0.1.5] — declared, not discovered
 
 **⚠️ Breaking, action-required — shipped as a PATCH**, matching its Python sibling

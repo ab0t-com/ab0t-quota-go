@@ -254,8 +254,55 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 				return AcquireResult{}, err
 			}
 		} else {
-			slog.Info("acquire_denied", "org", in.OrgID, "bundle", label, "user", in.UserID, "denied_resource", denied)
-			return AcquireResult{Admitted: false, DeniedResource: denied, Reason: "denied"}, nil
+			// P1 — RECOUNT-BEFORE-DENY on the atomic gauge path (ticket 20260810).
+			// A denial rests on the CACHED gauges; verify against the live provider,
+			// repair any stale-high gauge, and RETRY the spend once. Fail-OPEN on a
+			// provider error: retry with caps cleared (never block on an unverifiable
+			// cache). Only when an ObservedUsage provider is wired; else unchanged.
+			recounted := false
+			if e.ObservedUsage != nil && enabled {
+				obs, oerr := e.callObserved(ctx, in.OrgID)
+				if oerr != nil {
+					e.emitProviderUnreachable(ctx, in.OrgID,
+						config.ResourceDef{ResourceKey: label, CounterType: config.CounterGauge}, oerr)
+					for i := range specs {
+						specs[i].OrgLimit, specs[i].UserLimit = nil, nil
+					}
+					out, err = runAcquire(specs)
+					if err != nil {
+						return AcquireResult{}, err
+					}
+					recounted = true
+				} else {
+					repaired := false
+					for _, g := range gs {
+						obsN, present := obs[g.rk]
+						if !present {
+							continue // absence != zero (D-51) — can't verify this gauge
+						}
+						cur, _, _ := e.Factory.Floats.GetFloat(ctx, g.spec.OrgKey)
+						if math.Abs(float64(obsN)-cur) > driftEps {
+							rd := config.ResourceDef{ResourceKey: g.rk, CounterType: config.CounterGauge}
+							if rerr := e.repairCounterToTruth(ctx, rd, in.OrgID, float64(obsN)); rerr == nil {
+								e.emitDrift(ctx, in.OrgID, rd, "provider", cur, float64(obsN))
+								repaired = true
+							}
+						}
+					}
+					if repaired {
+						out, err = runAcquire(specs)
+						if err != nil {
+							return AcquireResult{}, err
+						}
+						recounted = true
+					}
+				}
+			}
+			if !(recounted && out.Admitted) {
+				slog.Info("acquire_denied", "org", in.OrgID, "bundle", label, "user", in.UserID, "denied_resource", denied)
+				return AcquireResult{Admitted: false, DeniedResource: denied, Reason: "denied"}, nil
+			}
+			// admitted via recount-repair → fall through to the post-spend section
 		}
 	}
 
