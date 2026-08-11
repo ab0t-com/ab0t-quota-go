@@ -3,6 +3,19 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [v0.1.8] — Tier resolution never downgrades a paying org on a billing hiccup
+
+Go parity with `ab0t-quota` v0.6.6. Non-breaking and purely additive.
+
+- `providers/mesh.go`: `GetTier` no longer swallows a lookup error to `nil` — it
+  propagates `ErrTierLookupFailed` alongside the fallback default, so the cache's
+  don't-cache-on-error guard actually engages.
+- `providers/cache.go`: serves **last-known-good** tier on a fetch failure (never caches
+  the free fallback); an unknown org still defaults (uncached); optional
+  `SetLastKnownGoodMaxAge`.
+- Documented parity gap vs Python: Go last-known-good is in-process (per-instance, lost on
+  restart) — a durable-store backing is a tracked follow-up.
+
 ## [v0.1.7] — Recount-before-deny, read-repair, and one-call recalculate
 
 Go parity with `ab0t-quota` (Python). Non-breaking and purely additive.
