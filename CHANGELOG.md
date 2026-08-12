@@ -3,6 +3,22 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [v0.1.9] — Durable last-known-good tier (H8) + sustained tier-failure detection (RC4)
+
+Parity with `ab0t-quota` v0.6.7. Non-breaking and purely additive — a consumer
+wiring nothing new behaves exactly as before.
+
+- **H8 — durable, cross-runtime last-known-good tier.** The Go LKG can now be backed
+  by Redis (`providers/lkg_store.go`), so the never-downgrade guarantee survives a
+  process restart during a billing outage (previously in-process only). The record is
+  **wire-compatible with Python** (`quota:tier:lkg:{org}`, JSON `{"tier","ts"}` — key
+  home `counters.TierLKGKey`), so a mixed Py/Go fleet shares one LKG per org. Auto-wires
+  only where Redis is already configured; unconfigured consumers are unaffected.
+- **RC4 — sustained tier-lookup-failure detection.** Per-org consecutive fetch-failure
+  streaks escalate to an ERROR-level `tier_lookup_failing_sustained` signal at a
+  threshold; **detection-only — serving is unchanged** (last-known-good still applies).
+  1:1 with the Python RC4.
+
 ## [v0.1.8] — Tier resolution never downgrades a paying org on a billing hiccup
 
 Go parity with `ab0t-quota` v0.6.6. Non-breaking and purely additive.

@@ -255,3 +255,16 @@ func (k Keyspace) RecentKey(org string) (string, error) {
 func MarkerKey(service string) string {
 	return "quota:keyspace:meta:" + service
 }
+
+// TierLKGKey — the durable last-known-good TIER record for an org
+// (providers/lkg_store.go; H8 parity, ticket
+// 20260810_tier_failclosed_lastknowngood follow-up). Wire-compatible with
+// Python AuthServiceTierProvider._LKG_PREFIX ("quota:tier:lkg:{org}") so a
+// mixed Python/Go fleet shares ONE record per org. NOT a counter key: it
+// carries an entitlement string, not spend, and deliberately does NOT migrate
+// with the counter keyspace (v1/v2) — the tier record is a fixed
+// cross-runtime contract, which is why it lives in the shape home rather than
+// as a raw literal in the providers package (census rule R1).
+func TierLKGKey(orgID string) string {
+	return "quota:tier:lkg:" + orgID
+}

@@ -279,8 +279,10 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quota.Setup: tier provider: %w", err)
 	}
+	var tierCache *providers.Cache
 	if cfg.TierProvider.CacheTTLSec > 0 {
-		prov = providers.WithCache(prov, time.Duration(cfg.TierProvider.CacheTTLSec)*time.Second)
+		tierCache = providers.WithCache(prov, time.Duration(cfg.TierProvider.CacheTTLSec)*time.Second)
+		prov = tierCache
 	}
 
 	reg := registry.New(cfg)
@@ -446,6 +448,16 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	}
 	if redisClient != nil {
 		q.redisProbe = redisClient // D-75: the counter's Redis, re-verified every reconcile pass
+	}
+	if redisClient != nil && tierCache != nil {
+		// H8 parity (PROGRAM_FOLLOWUPS "Go last-known-good durability"): back the
+		// tier cache's last-known-good with the counters' durable Redis so the
+		// never-downgrade guarantee survives restarts. The record is
+		// wire-compatible with Python's `quota:tier:lkg:{org}`, so a mixed
+		// Py/Go fleet shares one LKG per org. Additive: memory-only deployments
+		// (no redis_url) keep the in-process LKG exactly as before.
+		tierCache.SetDurableLKGStore(providers.NewRedisLKGStore(redisClient))
+		slog.Info("tier last-known-good backed by durable redis (python-compatible record)")
 	}
 	q.Engine = &engine.Engine{
 		Cfg:      cfg,
