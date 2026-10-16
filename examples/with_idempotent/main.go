@@ -33,20 +33,39 @@ func main() {
 	// Register a custom handler with retry + dedup.
 	h := authevents.Idempotent(handlerledger.IdempotentConfig{
 		Handler: "payment_credit_topup",
+		// Business dedup: one top-up per payment, however many times (and under
+		// however many event ids) it is delivered. Return "" when the event
+		// carries no payment id — an empty field must never become a shared key.
 		Key: func(e handlerledger.Event) string {
-			// Business-dedup: one top-up per (user, payment_id).
-			return "topup:" + e.GetUserID() + ":" + e.GetEventID()
+			ev, _ := e.(authevents.Event)
+			pid, _ := ev.Data["payment_id"].(string)
+			if pid == "" {
+				return ""
+			}
+			return "topup:" + pid
 		},
 		Retry: handlerledger.DefaultRetry(),
 	}, func(ctx context.Context, e handlerledger.Event, hctx *handlerledger.Context) error {
-		slog.Info("topup handler",
-			"event_id", e.GetEventID(), "user_id", e.GetUserID())
-		// Real work would go here (call billing.GrantCredit, etc).
+		// Business dedup is explicit: check before the side effect, mark after.
+		if done, err := hctx.AlreadyDone(ctx); err != nil {
+			return err // retried
+		} else if done {
+			return hctx.Skip("already topped up")
+		}
+		slog.Info("topup handler", "event_id", e.GetEventID(), "user_id", e.GetUserID())
+		// Real work goes here, with the SAME key as the money call's idempotency
+		// key so the provider dedups too, e.g.
+		//   q.Billing.GrantPromotionalCredit(ctx, e.GetOrgID(), billing.PromotionalCreditRequest{
+		//       Amount: amount, Reason: "topup", IdempotencyKey: hctx.DedupKey})
+		if err := hctx.MarkDone(ctx, e.GetEventID()); err != nil {
+			slog.Warn("mark done failed (the provider's idempotency key still protects a retry)", "err", err)
+		}
 		return hctx.Success(e.GetEventID())
 	})
 	authevents.OnAuthEvent("payment.succeeded", h)
 
 	mux := http.NewServeMux()
+	// The path quotactl subscribe-events / AutoSubscribe register with auth.
 	mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 	go func() {

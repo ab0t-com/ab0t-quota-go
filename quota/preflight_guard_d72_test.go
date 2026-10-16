@@ -227,7 +227,7 @@ func TestHealthy_FailsOnUnsafeCounterStore_D72_D73(t *testing.T) {
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
 		RedisTopology: TopologySingleNode, FloatStore: "redis",
 		// T-13 fixture: the new D-2/GO-10 reachability guard requires the affirmative value.
-		RedisReachable: redisguard.RedisReachableOK,
+		RedisReachable:        redisguard.RedisReachableOK,
 		CounterEvictionPolicy: "noeviction", RedisScripting: "on (EVAL verified)",
 		// D-80/D-79 — the probe now also requires the FACT (no observed evictions) and the
 		// DERIVED guarantee (the invariants are actually being re-verified).

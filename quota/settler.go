@@ -18,8 +18,10 @@ package quota
 //	                            "org mismatch" AND "already committed". Two of the three mean
 //	                            the money was NOT taken. RETRY — never ack, never void.
 //	400 -> ErrSettlePermanent   negative cost. A retry cannot fix it.
-//	403 -> ErrSettlePermanent   authz. A retry cannot fix it.
-//	404 -> ErrSettlePermanent   no billing account for this org.
+//	401/403 -> ErrSettleTransient credentials / authz: heal when the operator fixes the key
+//	                            (v0.1.10 — voiding money on a rotated key was B-04).
+//	404 -> ErrSettlePermanent   ONLY billing's "Billing account not found"; a route 404
+//	                            (wrong URL / proxy) is ErrSettleTransient (v0.1.10).
 //	5xx -> ErrSettleTransient   billing is broken/restarting. RETRY.
 //	408 -> ErrSettleTransient   timeout.
 //	429 -> ErrSettleTransient   rate-limited.
@@ -32,6 +34,8 @@ package quota
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/ab0t-com/ab0t-quota-go/billing"
 	"github.com/ab0t-com/ab0t-quota-go/internal/httpx"
@@ -73,15 +77,28 @@ func (b billingSettler) SettleActivation(ctx context.Context, in outbox.SettleRe
 // response been lost. Retrying is safe — billing's dedup is a durable conditional write — and
 // voiding is not: voiding money we may already have charged corrupts the books in the one
 // direction this ticket exists to prevent.
+//
+// v0.1.10 (ticket 20261016, B-04): 401, 403 and a ROUTE 404 are configuration faults —
+// a rotated or expired key, a permission change, a wrong base URL or proxy path. They
+// heal when the operator fixes them, and a permanent outcome VOIDS the money event,
+// irreversibly. So they RETRY (loudly, via lifecycle_settle_RETRY + the pending count).
+// Only billing's own "no billing account for this org" 404
+// (app/core/reservation.py:1629-1631) is permanent.
 func classifySettleError(err error) error {
+	var he *httpx.Error
 	switch {
 	case httpx.IsStatus(err, 409):
 		return outbox.ErrSettleRefused409
-	case httpx.IsStatus(err, 400), httpx.IsStatus(err, 403), httpx.IsStatus(err, 404),
-		httpx.IsStatus(err, 401), httpx.IsStatus(err, 422):
+	case httpx.IsStatus(err, 404):
+		if errors.As(err, &he) && strings.Contains(he.Body, "Billing account not found") {
+			return outbox.ErrSettlePermanent
+		}
+		return outbox.ErrSettleTransient // a route / proxy 404: the request never reached settle
+	case httpx.IsStatus(err, 400), httpx.IsStatus(err, 422):
 		return outbox.ErrSettlePermanent
 	default:
-		// 5xx, 408, 429, connection refused, timeout, anything unrecognised.
+		// 401/403 (credentials — heal when fixed), 5xx, 408, 429, connection refused,
+		// timeout, anything unrecognised.
 		return outbox.ErrSettleTransient
 	}
 }

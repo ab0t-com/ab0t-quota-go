@@ -1,0 +1,11 @@
+{
+  "tiers": [
+    { "tier_id": "free", "credit_grant": { "trigger": "signup", "amount_per_period": "5.00" } },
+    { "tier_id": "pro",
+      "_comment": "quotago:v0.1.10-reviewed — the refill is not a sign-up gift",
+      "credit_grant": {
+        "trigger": "subscription_invoice_paid",
+        "amount_per_period": "10.00"
+      } }
+  ]
+}

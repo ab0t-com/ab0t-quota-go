@@ -59,7 +59,7 @@ var plants = []plant{
 	{`The library defaults to redis://localhost:6379/0 when unset.`, "localhost-redis-endpoint"},
 	{"Use `rediss://127.0.0.1:6380/0` for TLS testing.", "localhost-redis-endpoint"},
 	{`connect to Redis://LOCALHOST:6379 first`, "localhost-redis-endpoint"}, // lowercase-prose/case form
-	{`"redis_url": "redis://[::1]:6379/0"`, "localhost-redis-endpoint"},    // IPv6 loopback
+	{`"redis_url": "redis://[::1]:6379/0"`, "localhost-redis-endpoint"},     // IPv6 loopback
 	{`"redis_url": "redis://host.docker.internal:6379/0"`, "localhost-redis-endpoint"},
 	// -- generic env names (markup shapes) --
 	{`| REDIS_URL | the redis endpoint |`, "generic-REDIS_URL"},

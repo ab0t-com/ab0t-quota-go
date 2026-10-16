@@ -51,6 +51,44 @@ type CreditGrantRequest struct {
 	GrantedAt string
 	Source    string // "auth_event"
 	Trigger   string // CreditTrigger value
+
+	// v0.1.10 — what a granter needs to move the money exactly once and into
+	// the right bucket. All populated by the default handler.
+	//
+	// IdempotencyKey is the key to send to billing. It is derived from the
+	// tier's dedup policy only (never the event id), so every redelivery,
+	// replay or backfill of the same grant carries the SAME key and billing's
+	// durable dedup refuses the duplicate. Shape (wire-compatible with the
+	// Python runtime, ab0t_quota/auth_events.py:641-650):
+	//
+	//	per_user_per_tier → user:{user_id}:initial_credit:{tier_id}
+	//	per_org_per_tier  → org:{org_id}:initial_credit:{tier_id}
+	//	per_user_global   → user:{user_id}:initial_credit
+	//	per_org_global    → org:{org_id}:initial_credit
+	IdempotencyKey string
+	// DedupKey is the library's business-dedup key (ComposeCreditDedupKey).
+	DedupKey string
+	// Destination / Lifecycle / RolloverMax are the tier's credit_grant
+	// declaration (RolloverMax = rollover_max_periods × amount, set only for
+	// lifecycle "rollover_capped").
+	Destination string
+	Lifecycle   string
+	RolloverMax *decimal.Decimal
+}
+
+// BillingIdempotencyKey returns the billing idempotency key for a sign-up grant
+// under the given dedup policy (see CreditGrantRequest.IdempotencyKey).
+func BillingIdempotencyKey(policy, userID, orgID, tierID string) string {
+	switch policy {
+	case string(config.DedupPerOrgPerTier):
+		return "org:" + orgID + ":initial_credit:" + tierID
+	case string(config.DedupPerUserGlobal):
+		return "user:" + userID + ":initial_credit"
+	case string(config.DedupPerOrgGlobal):
+		return "org:" + orgID + ":initial_credit"
+	default: // per_user_per_tier
+		return "user:" + userID + ":initial_credit:" + tierID
+	}
 }
 
 // CreditGrantHooks lets consumers observe the lifecycle. Optional.
@@ -143,6 +181,23 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 			hooks.OnSkipped("no credit_grant for tier: "+tierID, ev)
 			return hctx.Skip("no credit_grant for tier")
 		}
+		// v0.1.10 (ticket 20261016, REV-01): an auth event is a SIGN-UP. Only a
+		// trigger "signup" grant may fire here — a paid tier's monthly refill
+		// (subscription_invoice_paid) or a manual/scheduled grant must not be
+		// handed out as a free gift every time someone joins an org on that
+		// tier. Python parity (auth_events.py:608-610). An absent trigger is
+		// still treated as sign-up (what v0.1.9 did for it), loudly.
+		switch tier.CreditGrant.Trigger {
+		case config.CreditTriggerSignup:
+		case "":
+			slog.Warn("credit_grant has no trigger — treating it as \"signup\"; declare "+
+				"\"trigger\": \"signup\" explicitly (the Python runtime does NOT grant without it)",
+				"tier_id", tierID)
+		default:
+			reason := "credit_grant trigger is " + string(tier.CreditGrant.Trigger) + ", not signup: " + tierID
+			hooks.OnSkipped(reason, ev)
+			return hctx.Skip(reason)
+		}
 
 		// Business dedup — per-tier policy (defaults to per_user_per_tier).
 		policy := string(tier.CreditGrant.Dedup)
@@ -162,15 +217,23 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 		}
 
 		req := CreditGrantRequest{
-			UserID:    userID,
-			OrgID:     orgID,
-			TierID:    tierID,
-			Amount:    tier.CreditGrant.AmountPerPeriod.Decimal,
-			Currency:  tier.CreditGrant.Currency,
-			EventID:   ev.GetEventID(),
-			GrantedAt: ev.OccurredAt.UTC().Format("2006-01-02T15:04:05Z"),
-			Source:    "auth_event",
-			Trigger:   string(tier.CreditGrant.Trigger),
+			UserID:         userID,
+			OrgID:          orgID,
+			TierID:         tierID,
+			Amount:         tier.CreditGrant.AmountPerPeriod.Decimal,
+			Currency:       tier.CreditGrant.Currency,
+			EventID:        ev.GetEventID(),
+			GrantedAt:      ev.OccurredAt.UTC().Format("2006-01-02T15:04:05Z"),
+			Source:         "auth_event",
+			Trigger:        string(tier.CreditGrant.Trigger),
+			IdempotencyKey: BillingIdempotencyKey(policy, userID, orgID, tierID),
+			DedupKey:       dedupKey,
+			Destination:    string(tier.CreditGrant.Destination),
+			Lifecycle:      string(tier.CreditGrant.Lifecycle),
+		}
+		if tier.CreditGrant.Lifecycle == config.CreditLifecycleRolloverCapped && tier.CreditGrant.RolloverMaxPeriods != nil {
+			m := tier.CreditGrant.AmountPerPeriod.Decimal.Mul(decimal.NewFromInt(int64(*tier.CreditGrant.RolloverMaxPeriods)))
+			req.RolloverMax = &m
 		}
 		if err := granter.GrantCredit(ctx, req); err != nil {
 			hooks.OnFailed(err, ev)

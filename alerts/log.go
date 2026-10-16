@@ -17,6 +17,8 @@ func (LogDispatcher) Send(_ context.Context, level Level, r engine.Result) error
 		"tier", r.TierID,
 		"used", r.Used,
 		"threshold", r.Threshold,
+		"org_id", r.OrgID, // v0.1.10
+		"reason", r.Reason,
 	}
 	if r.Limit != nil {
 		attrs = append(attrs, "limit", *r.Limit)

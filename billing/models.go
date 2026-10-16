@@ -8,12 +8,22 @@ import (
 )
 
 // UsageSummary is the response from GET /billing/usage/{org_id}/summary.
+//
+// v0.1.10 (ticket 20261016, B-08): billing answers UsageSummaryResponse
+// {org_id, start_date, end_date, period, summary, group_by} (billing
+// app/models/billing.py:1082-1089). Resources / Spend / GeneratedAt are never
+// sent by billing (always empty / 0) and are kept only for API stability — read
+// Summary.
 type UsageSummary struct {
 	OrgID       string           `json:"org_id"`
 	Period      string           `json:"period"`
 	Resources   map[string]Usage `json:"resources"`
 	Spend       decimal.Decimal  `json:"spend_usd"`
 	GeneratedAt string           `json:"generated_at"`
+	StartDate   string           `json:"start_date,omitempty"`
+	EndDate     string           `json:"end_date,omitempty"`
+	Summary     map[string]any   `json:"summary,omitempty"`
+	GroupBy     []string         `json:"group_by,omitempty"`
 }
 
 // Usage is one resource's usage snapshot.
@@ -40,23 +50,80 @@ type QuotaCheckResponse struct {
 	UpgradeURL string   `json:"upgrade_url,omitempty"`
 }
 
-// CreditGrantRequest is POST /billing/credits/grant.
+// CreditGrantRequest is the input to Client.GrantCredit — a sign-up / gift grant
+// into the org's credit_balance. Since v0.1.10 it is sent to billing's real
+// POST /billing/{org_id}/promotional-credit route (see GrantCredit); before that
+// it was posted, verbatim, to /billing/credits/grant, which billing never served.
 type CreditGrantRequest struct {
 	UserID  string          `json:"user_id"`
-	OrgID   string          `json:"org_id,omitempty"`
+	OrgID   string          `json:"org_id,omitempty"` // REQUIRED (the org that receives the credit)
 	TierID  string          `json:"tier_id"`
 	Amount  decimal.Decimal `json:"amount"`
 	EventID string          `json:"event_id,omitempty"`
 	Reason  string          `json:"reason,omitempty"`
+	// IdempotencyKey (v0.1.10) is what billing dedups on — durably and forever.
+	// Empty → derived from the grant (never from the attempt):
+	// "user:{UserID}:initial_credit:{TierID}" when both are set (the Python
+	// runtime's sign-up key), else "event:{EventID}". Neither available → error.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
-// CreditGrantResponse — POST /billing/credits/grant response.
+// CreditGrantResponse is Client.GrantCredit's result.
 type CreditGrantResponse struct {
-	GrantID string          `json:"grant_id"`
-	Balance decimal.Decimal `json:"balance"`
+	GrantID string          `json:"grant_id"` // billing's payment_id ("promo:{idempotency_key}")
+	Balance decimal.Decimal `json:"balance"`  // the org's credit_balance after the grant
+	// Result (v0.1.10) is billing's full reply.
+	Result *UpdateBalanceResponse `json:"result,omitempty"`
 }
 
-// HeartbeatRequest is POST /billing/heartbeat — the lifecycle ping.
+// PromotionalCreditRequest is POST /billing/{org_id}/promotional-credit
+// (billing app/models/billing.py PromotionalCreditRequest). Billing adds the
+// amount to the org's credit_balance, refuses over its caps (by default $500 per
+// grant, $1,000 lifetime promotional credit per org → 400; 10 grants per org per
+// hour → 429), and answers a repeated IdempotencyKey with the ORIGINAL result.
+// The caller needs billing.write.transactions (or billing.write / billing.admin).
+type PromotionalCreditRequest struct {
+	Amount         decimal.Decimal `json:"amount"`
+	Reason         string          `json:"reason,omitempty"` // billing default "initial_credit"
+	IdempotencyKey string          `json:"idempotency_key"`  // REQUIRED, non-blank, stable across retries
+}
+
+// ApplyCreditGrantRequest is POST /billing/{org_id}/apply-credit-grant (billing
+// app/models/billing.py CreditGrantRequest): a grant into an explicit bucket under
+// an explicit period-boundary policy. Same permissions and idempotency contract as
+// promotional credit, no lifetime cap.
+type ApplyCreditGrantRequest struct {
+	Amount      decimal.Decimal `json:"amount"`
+	Destination string          `json:"destination"` // balance | credit_balance | subscription_credit
+	Lifecycle   string          `json:"lifecycle"`   // persistent | use_it_or_lose_it | rollover_unlimited | rollover_capped
+	// RolloverMax is required when Lifecycle is rollover_capped and must be absent otherwise.
+	RolloverMax    *decimal.Decimal `json:"rollover_max,omitempty"`
+	Source         string           `json:"source,omitempty"`
+	SourceTier     string           `json:"source_tier,omitempty"`
+	IdempotencyKey string           `json:"idempotency_key"` // REQUIRED, non-blank, stable across retries
+	Reason         string           `json:"reason,omitempty"`
+}
+
+// UpdateBalanceResponse is billing's reply to the credit routes (billing
+// app/models/billing.py UpdateBalanceResponse). Money fields are decimals
+// (billing serialises them as JSON strings).
+type UpdateBalanceResponse struct {
+	OrgID            string          `json:"org_id"`
+	OldBalance       decimal.Decimal `json:"old_balance"`
+	NewBalance       decimal.Decimal `json:"new_balance"`
+	Amount           decimal.Decimal `json:"amount"`
+	Operation        string          `json:"operation"`
+	AvailableBalance decimal.Decimal `json:"available_balance"`
+	PaymentID        string          `json:"payment_id,omitempty"`
+	PaymentMethod    string          `json:"payment_method,omitempty"`
+	Description      string          `json:"description,omitempty"`
+	FundingSource    string          `json:"funding_source,omitempty"`
+	AdminUserID      string          `json:"admin_user_id,omitempty"`
+	Metadata         map[string]any  `json:"metadata,omitempty"`
+}
+
+// HeartbeatRequest is the lifecycle ping body. Billing serves NO heartbeat route
+// (see Client.Heartbeat).
 type HeartbeatRequest struct {
 	ServiceName string `json:"service_name"`
 	Version     string `json:"version,omitempty"`

@@ -31,6 +31,9 @@ type Result struct {
 	RetryAfter time.Duration
 	Message    string
 	UpgradeURL string
+	// OrgID (v0.1.10) is the org the decision is for — Engine.Check sets it, so
+	// alert cooldowns and payloads are per tenant (ticket 20261016, C-11).
+	OrgID string
 
 	// Debug captures structured diagnostics for log emission.
 	Debug map[string]any

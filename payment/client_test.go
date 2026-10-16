@@ -45,8 +45,11 @@ func TestClient_VerifyUsesGET(t *testing.T) {
 }
 
 func TestClient_ListPaymentMethods(t *testing.T) {
+	// v0.1.10: this test pinned /customer/{org}/payment_methods, a route payment
+	// never served (ticket 20261016, B-08). It now pins the real route; the
+	// legacy "items" body is kept to prove it is still tolerated.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/customer/org1/payment_methods" {
+		if r.URL.Path != "/payment-methods/org1" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{

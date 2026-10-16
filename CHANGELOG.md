@@ -3,6 +3,125 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.1.10] — 2026-10-16
+
+Bug fixes from a vendor-style review (sign-up credit, settlement money paths,
+CLI honesty, client routes). **No exported symbol was removed or changed; every
+API change is an addition.** Some fixed bugs changed behaviour you could notice —
+they are marked ⚠ and listed with what to check in
+[`migrations/v0.1.9-to-v0.1.10/`](migrations/v0.1.9-to-v0.1.10/MIGRATION.md)
+(read-only checker included).
+
+### Sign-up credit (auth events)
+
+- **Fixed: the receiver answered `404` to every event when mounted as documented.**
+  `mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())` — the
+  form in the examples and the path `SubscribeOnStartup` registers — never reached
+  the handler, so no sign-up credit was ever granted. The receiver now answers any
+  path ending in `/_webhooks/auth`; `http.StripPrefix` (the old workaround) still works.
+  Non-POST on the path is `405`, other paths `404`, a body over 1 MiB `413`.
+- ⚠ **Fixed: the default credit handler granted ANY tier's `credit_grant` on
+  `org.created` / `user.org_assigned`**, including a paid tier's monthly refill
+  (`trigger: "subscription_invoice_paid"`) — handed out as a gift each time a user
+  joined an org on that tier. Only `trigger: "signup"` grants now (Python parity).
+  A grant with no trigger is still treated as sign-up, with a warning.
+- **Fixed: `billing.Client.GrantCredit` posted to `/billing/credits/grant`, which billing
+  never served.** It now uses billing's real `POST /billing/{org}/promotional-credit`
+  with a stable idempotency key (signature unchanged; `OrgID` is required). New:
+  `GrantPromotionalCredit`, `ApplyCreditGrant` (`/apply-credit-grant`),
+  `UpdateBalanceResponse`, and **`quota.BillingCreditGranter(nil)`** — a built-in
+  granter (`credit_balance`/`persistent` → promotional credit, any other bucket →
+  apply-credit-grant). `authevents.CreditGrantRequest` gained `IdempotencyKey`
+  (`user:{u}:initial_credit:{tier}` by default — the Python runtime's key, never the
+  event id), `DedupKey`, `Destination`, `Lifecycle`, `RolloverMax`.
+- **New: secret-rotation overlap.** `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` (comma-separated)
+  is accepted alongside the current secret; `ReceiverConfig.PreviousSecrets`,
+  `ReceiverConfig.MaxBodyBytes`.
+- ⚠ **`quotactl subscribe-events` fails loudly.** v0.1.9 exited `0` with an empty
+  `subscription_id:` when registration failed, read only page 1 of the list, and
+  re-running never applied a new secret or event list. It now uses the new strict
+  `authevents.Subscribe`: any failure exits non-zero with the HTTP status and a
+  remedy; a changed secret/event list on an existing subscription is an error naming
+  `--rotate-secret`, which deletes and re-creates the subscription (auth cannot edit
+  a secret). `SubscribeOnStartup` stays best-effort, now paginates, and logs an
+  ERROR when the existing subscription's secret differs.
+
+### Money paths (settlement fallback, metering)
+
+- ⚠ **Fixed: a money event with no reservation id was settled under the key `""`.**
+  Billing dedups that key per org forever, so the second and later such settlements
+  were acknowledged as "replayed" and their money never taken. They are now voided
+  and alerted (`no_settlement_key`), loudly.
+- ⚠ **Fixed: a terminal event without `stopped_at` was priced up to settle time** — for
+  the past-horizon fallback, hours or days after the stop. The stop now defaults to
+  when the event entered the outbox.
+- ⚠ **Fixed: `401`, `403` and a route `404` from billing voided money events.** A
+  rotated key, a permission change or a wrong base URL now keeps them pending
+  (retried); only billing's "Billing account not found" `404`, `400` and `422` void.
+- **Documented, not changed:** `RecordUsage` sends an empty `Cost` / `PlatformFee` as
+  absent, and billing then prices the row with its fallback rates and minimum charge.
+  Always set both to `"0"` on a metering row (some callers rely on omission, so the
+  library does not default them).
+- **Fixed (internal HTTP client):** a redirect to another host carried the
+  `X-API-Key` (now refused); a malformed base URL panicked (now an error); response
+  bodies are capped at 10 MiB; org ids are path-escaped in every billing/payment URL.
+- **Fixed:** the handler-ledger retry loop kept calling the handler after its context
+  was cancelled; a malformed Lua reply from the counter script was a silent `429`
+  instead of an error.
+
+### Clients (billing / payment)
+
+- **Fixed:** `payment.CreatePortalSession` → `POST /portal/{org}/session`,
+  `payment.ListPaymentMethods` → `GET /payment-methods/{org}` (reads
+  `payment_methods`); both 404'd or returned an empty list before.
+  `CheckoutSession` gained `PaymentStatus` / `AmountTotal` (dollars, as payment sends it) — fulfil on
+  `PaymentStatus == "paid"`. `UsageSummary` gained `Summary`, `StartDate`,
+  `EndDate`, `GroupBy` (billing's real reply).
+- **Documented, not re-pointed** (their request shapes do not map): `CheckQuota`,
+  `GetSubscription`, `CancelSubscription` (billing host — subscriptions live on
+  payment) and `payment.CreateCheckoutSession` answer 404; their doc comments say so.
+- **Heartbeat:** billing serves no heartbeat route; the loop now stops after the first
+  `404` (one INFO line) instead of warning every 60 s.
+- **DynamoDB handler ledger:** a self-created table now has the `GSI1`/`GSI2` indexes
+  `QueryByUser`, `QueryByStatus` and `DeleteUser` use (they failed with
+  `ValidationException` before — including GDPR deletion). An existing table without
+  them is reported at boot with the fix.
+
+### Operations, config and observability
+
+- **New: `config.Warnings()` / `Capabilities.ConfigWarnings`** — logged at boot: enforcement
+  off, an accumulator `reset_period` the code does not know (it never resets), a
+  limit naming no resource, unknown `billing_model` / `trigger` / `dedup` / `lifecycle`
+  / `destination`. Warnings only; nothing that booted refuses.
+- ⚠ **Threshold-alert cooldown is per org** (was per resource+tier: one tenant muted
+  everyone). Alert payloads gained `org_id` and `reason`; `engine.Result` gained `OrgID`.
+- **Fixed:** an unparseable `redis_url` printed its password in the log, in
+  `quotactl capabilities` and in the startup error.
+- **Fixed:** `Close` now removes the credit handler `Setup` registered (repeated Setup
+  calls stacked handlers); `Capabilities` publication and `BillingHealthy` are locked.
+- The paid-mode refusal names why paid mode is on (e.g. `AB0T_QUOTA_BILLING_URL is set`)
+  and how to opt out (`Options.EnablePaid=&false`).
+- `Authorization: bearer …` (any case) is recognised.
+- A set-but-ignored `AB0T_QUOTA_CONFIG_PATH` is now a warning (the variable is
+  `QUOTA_CONFIG_PATH`; the examples named the wrong one).
+
+### CLI
+
+- ⚠ `replay` / `backfill` exit non-zero when any event is not accepted; `backfill`
+  requires `--target` and a secret (unless `--dry-run`). Their `--help` no longer
+  prints the live `AB0T_AUTH_WEBHOOK_SECRET` (it was the flag default).
+- ⚠ `events` / `delete-user` refuse (non-zero) instead of reading an empty in-process
+  stub — `delete-user` used to print "deleted 0 rows" and exit 0. Use
+  `q.LedgerStore` inside your service.
+- `quotactl --version` reports the module version for `go install …@vX.Y.Z` builds
+  (was `dev`).
+
+### Docs
+
+- README rewritten against the code; its minimal example is `examples/basic/main.go`
+  verbatim (test-enforced) and the example now counts usage, so it actually limits.
+  The env-var table lists only names the code reads.
+
 ## [v0.1.9] — Durable last-known-good tier (H8) + sustained tier-failure detection (RC4)
 
 Parity with `ab0t-quota` v0.6.7. Non-breaking and purely additive — a consumer

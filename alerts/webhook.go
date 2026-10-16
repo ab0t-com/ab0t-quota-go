@@ -57,6 +57,8 @@ func (w *WebhookDispatcher) Send(ctx context.Context, level Level, r engine.Resu
 		"used":      r.Used,
 		"limit":     r.Limit,
 		"threshold": r.Threshold,
+		"org_id":    r.OrgID,  // v0.1.10
+		"reason":    r.Reason, // v0.1.10
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {

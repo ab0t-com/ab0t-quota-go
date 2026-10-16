@@ -23,14 +23,33 @@ type Client struct {
 	Token   string // bearer token, if any
 }
 
+// MaxResponseBytes bounds a response body (v0.1.10). Billing/payment replies are
+// small JSON documents; anything larger is refused rather than buffered whole.
+const MaxResponseBytes = 10 << 20
+
 // New builds a Client with a per-call default timeout of 15s. Override
 // via *Client.SetTimeout.
+//
+// v0.1.10: redirects to a DIFFERENT host are refused. The mesh key travels in
+// X-API-Key, which net/http (unlike Authorization) forwards across hosts — a
+// redirect would hand the service's key to whatever host it points at.
 func New(baseURL, token string) *Client {
 	return &Client{
-		http:    &http.Client{Timeout: 15 * time.Second},
+		http:    &http.Client{Timeout: 15 * time.Second, CheckRedirect: sameHostRedirectsOnly},
 		BaseURL: baseURL,
 		Token:   token,
 	}
+}
+
+func sameHostRedirectsOnly(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("httpx: stopped after 10 redirects")
+	}
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("httpx: refusing redirect from %s to another host (%s): it would carry the API key",
+			via[0].URL.Host, req.URL.Host)
+	}
+	return nil
 }
 
 // SetTimeout adjusts the http.Client timeout.
@@ -66,35 +85,46 @@ func IsStatus(err error, status int) bool {
 
 // GET issues a GET. The response body is decoded into `out` if non-nil.
 func (c *Client) GET(ctx context.Context, path string, out any) error {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.BaseURL+path, nil)
-	return c.do(req, out)
+	return c.send(ctx, "GET", path, nil, out)
 }
 
 // POST issues a POST with a JSON body. `in` is encoded; `out` is decoded.
 func (c *Client) POST(ctx context.Context, path string, in, out any) error {
-	body, err := json.Marshal(in)
-	if err != nil {
-		return fmt.Errorf("httpx: encode: %w", err)
-	}
-	req, _ := http.NewRequestWithContext(ctx, "POST", c.BaseURL+path, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	return c.do(req, out)
+	return c.sendJSON(ctx, "POST", path, in, out)
 }
 
 // PUT issues a PUT with a JSON body.
 func (c *Client) PUT(ctx context.Context, path string, in, out any) error {
-	body, err := json.Marshal(in)
-	if err != nil {
-		return fmt.Errorf("httpx: encode: %w", err)
-	}
-	req, _ := http.NewRequestWithContext(ctx, "PUT", c.BaseURL+path, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	return c.do(req, out)
+	return c.sendJSON(ctx, "PUT", path, in, out)
 }
 
 // DELETE issues a DELETE.
 func (c *Client) DELETE(ctx context.Context, path string, out any) error {
-	req, _ := http.NewRequestWithContext(ctx, "DELETE", c.BaseURL+path, nil)
+	return c.send(ctx, "DELETE", path, nil, out)
+}
+
+func (c *Client) sendJSON(ctx context.Context, method, path string, in, out any) error {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return fmt.Errorf("httpx: encode: %w", err)
+	}
+	return c.send(ctx, method, path, body, out)
+}
+
+// send builds the request — and, since v0.1.10, REPORTS a build failure (a
+// malformed base URL) instead of dereferencing a nil request.
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any) error {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rd)
+	if err != nil {
+		return fmt.Errorf("httpx: build %s request: %w", method, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return c.do(req, out)
 }
 
@@ -115,7 +145,13 @@ func (c *Client) do(req *http.Request, out any) error {
 		return fmt.Errorf("httpx: %s %s: %w", req.Method, req.URL.String(), err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("httpx: read %s: %w", req.URL.String(), err)
+	}
+	if len(body) > MaxResponseBytes {
+		return fmt.Errorf("httpx: %s: response larger than %d bytes refused", req.URL.String(), MaxResponseBytes)
+	}
 	if resp.StatusCode >= 400 {
 		return &Error{Status: resp.StatusCode, URL: req.URL.String(), Body: string(body)}
 	}

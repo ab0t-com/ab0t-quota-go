@@ -1,0 +1,11 @@
+{
+  "tiers": [
+    { "tier_id": "free", "credit_grant": { "amount_per_period": "5.00", "destination": "credit_balance" } },
+    { "tier_id": "pro",
+      "credit_grant": {
+        "trigger": "subscription_invoice_paid",
+        "amount_per_period": "10.00"
+      } },
+    { "tier_id": "ok", "credit_grant": { "trigger": "signup", "amount_per_period": "1" } }
+  ]
+}

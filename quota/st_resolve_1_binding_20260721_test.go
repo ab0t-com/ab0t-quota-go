@@ -245,13 +245,13 @@ func TestSTResolve1_Clause7_RetryContractPinned(t *testing.T) {
 			ID       string   `json:"id"`
 			Contract []string `json:"contract"`
 			Retry    *struct {
-				ConfigKey        string  `json:"config_key"`
-				DefaultSeconds   float64 `json:"default_seconds"`
-				ZeroMeans        string  `json:"zero_means"`
-				BackoffInitial   float64 `json:"backoff_initial_seconds"`
-				BackoffCap       float64 `json:"backoff_cap_seconds"`
-				RetriesKind      string  `json:"retries_kind"`
-				AuthNeverBudget  bool    `json:"auth_never_consumes_budget"`
+				ConfigKey       string  `json:"config_key"`
+				DefaultSeconds  float64 `json:"default_seconds"`
+				ZeroMeans       string  `json:"zero_means"`
+				BackoffInitial  float64 `json:"backoff_initial_seconds"`
+				BackoffCap      float64 `json:"backoff_cap_seconds"`
+				RetriesKind     string  `json:"retries_kind"`
+				AuthNeverBudget bool    `json:"auth_never_consumes_budget"`
 			} `json:"retry_contract"`
 		} `json:"structural_conformance"`
 	}

@@ -300,6 +300,17 @@ func (s *ddbLedgerStore) EnsureTable(ctx context.Context, activeTimeout time.Dur
 			AttributeDefinitions: []ddbtypes.AttributeDefinition{
 				{AttributeName: strPtr("PK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
 				{AttributeName: strPtr("SK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+				{AttributeName: strPtr("GSI1PK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+				{AttributeName: strPtr("GSI1SK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+				{AttributeName: strPtr("GSI2PK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+				{AttributeName: strPtr("GSI2SK"), AttributeType: ddbtypes.ScalarAttributeTypeS},
+			},
+			// v0.1.10 (ticket 20261016, B-18): the indexes QueryByUser / QueryByStatus /
+			// DeleteUser query. Without them every per-user query and every GDPR
+			// deletion on a self-provisioned table failed with ValidationException.
+			GlobalSecondaryIndexes: []ddbtypes.GlobalSecondaryIndex{
+				ledgerGSI("GSI1", "GSI1PK", "GSI1SK"),
+				ledgerGSI("GSI2", "GSI2PK", "GSI2SK"),
 			},
 			BillingMode: ddbtypes.BillingModePayPerRequest,
 		})
@@ -311,6 +322,21 @@ func (s *ddbLedgerStore) EnsureTable(ctx context.Context, activeTimeout time.Dur
 
 	if activeTimeout <= 0 {
 		activeTimeout = 60 * time.Second
+	}
+	// v0.1.10 (B-18): a table created by v0.1.9 has no GSI1/GSI2. Say so loudly —
+	// adding an index is an infra change the library does not make on its own.
+	if out, err := full.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &s.table}); err == nil && out.Table != nil {
+		have := map[string]bool{}
+		for _, g := range out.Table.GlobalSecondaryIndexes {
+			if g.IndexName != nil {
+				have[*g.IndexName] = true
+			}
+		}
+		if !have["GSI1"] || !have["GSI2"] {
+			slog.Error("handler-ledger table has no GSI1/GSI2 — QueryByUser, QueryByStatus and DeleteUser "+
+				"(GDPR deletion) FAIL on it. Add GSI1 (GSI1PK/GSI1SK) and GSI2 (GSI2PK/GSI2SK), projection ALL "+
+				"(tables created by v0.1.9 lack them)", "table", s.table)
+		}
 	}
 	deadline := time.Now().Add(activeTimeout)
 	for {
@@ -356,6 +382,17 @@ func (s *ddbLedgerStore) Table() string { return s.table }
 
 // Client exposes the DDB client for the D-76 preflight (nil for a test double).
 func (s *ddbLedgerStore) Client() any { return s.c }
+
+func ledgerGSI(name, pk, sk string) ddbtypes.GlobalSecondaryIndex {
+	return ddbtypes.GlobalSecondaryIndex{
+		IndexName: strPtr(name),
+		KeySchema: []ddbtypes.KeySchemaElement{
+			{AttributeName: strPtr(pk), KeyType: ddbtypes.KeyTypeHash},
+			{AttributeName: strPtr(sk), KeyType: ddbtypes.KeyTypeRange},
+		},
+		Projection: &ddbtypes.Projection{ProjectionType: ddbtypes.ProjectionTypeAll},
+	}
+}
 
 func strPtr(s string) *string { return &s }
 func boolPtr(b bool) *bool    { return &b }

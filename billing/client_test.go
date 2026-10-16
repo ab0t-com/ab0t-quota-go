@@ -30,19 +30,23 @@ func TestClient_CheckQuota(t *testing.T) {
 }
 
 func TestClient_GrantCredit(t *testing.T) {
+	// v0.1.10: this test used to pin the guessed route /billing/credits/grant
+	// (which billing never served — ticket 20261016). It now pins the real route
+	// and the response mapping; the full contract lives in
+	// credit_routes_20261016_test.go.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/billing/credits/grant" {
+		if r.URL.Path != "/billing/o1/promotional-credit" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(CreditGrantResponse{
-			GrantID: "g-1",
-			Balance: decimal.NewFromInt(25),
+		_ = json.NewEncoder(w).Encode(UpdateBalanceResponse{
+			OrgID: "o1", PaymentID: "g-1", NewBalance: decimal.NewFromInt(25), Amount: decimal.NewFromInt(25),
+			Operation: "promotional_credit",
 		})
 	}))
 	defer srv.Close()
 	c, _ := New(mesh.URLs{Billing: srv.URL})
 	resp, err := c.GrantCredit(context.Background(), CreditGrantRequest{
-		UserID: "u", TierID: "pro", Amount: decimal.NewFromInt(25),
+		UserID: "u", OrgID: "o1", TierID: "pro", Amount: decimal.NewFromInt(25),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -324,7 +324,7 @@ func (s *redisFloatStore) DualAtomicAcquire(ctx context.Context, idem DualPair, 
 	if err != nil {
 		return AcquireOutcome{}, err
 	}
-	return parseAcquireReply(res), nil
+	return parseAcquireReply(res)
 }
 
 func parseLuaFloat(res any) (float64, error) {
@@ -339,10 +339,12 @@ func parseLuaFloat(res any) (float64, error) {
 	return 0, fmt.Errorf("unexpected Lua numeric reply %T", res)
 }
 
-func parseAcquireReply(res any) AcquireOutcome {
+// parseAcquireReply reads the dual acquire script's reply. v0.1.10 (A-28): an
+// unreadable reply is an error, never a silent deny.
+func parseAcquireReply(res any) (AcquireOutcome, error) {
 	arr, ok := res.([]any)
 	if !ok || len(arr) != 2 {
-		return AcquireOutcome{}
+		return AcquireOutcome{}, fmt.Errorf("counters: unexpected acquire script reply %T %v", res, res)
 	}
 	out := AcquireOutcome{Admitted: toStr(arr[0]) == "1"}
 	switch reason := toStr(arr[1]); reason {
@@ -350,11 +352,13 @@ func parseAcquireReply(res any) AcquireOutcome {
 		out.Dup = true
 	case "ok":
 	default:
-		if idx, e := strconv.Atoi(reason); e == nil {
-			out.DeniedIndex = idx
+		idx, e := strconv.Atoi(reason)
+		if e != nil && !out.Admitted {
+			return AcquireOutcome{}, fmt.Errorf("counters: unexpected acquire script reason %q", reason)
 		}
+		out.DeniedIndex = idx
 	}
-	return out
+	return out, nil
 }
 
 // --- in-memory implementations (atomic under the store mutex) ---

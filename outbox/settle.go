@@ -31,6 +31,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"strings"
+	"time"
 
 	"github.com/ab0t-com/ab0t-quota-go/observation"
 )
@@ -221,6 +224,23 @@ func (e *Emitter) trySettle(ctx context.Context, r Record) (string, string) {
 	// The Record is the authority on which reservation this is; the payload may disagree.
 	if ev.ReservationID == "" {
 		ev.ReservationID = r.ReservationID
+	}
+	// v0.1.10 (ticket 20261016, B-02): NEVER settle under a blank key. Billing accepts
+	// settlement_key "" and dedups it per org FOREVER, so the org's first keyless
+	// settlement would land and every later one come back 200 replayed=true —
+	// marked delivered, no money moved, no alert. Without a reservation id there is
+	// no key both settlement paths agree on: void + alert, loudly.
+	if strings.TrimSpace(r.ReservationID) == "" {
+		return "unsettleable", "no_settlement_key: the money event carries no reservation_id"
+	}
+	// v0.1.10 (B-03): a terminal event without stopped_at used to be priced to
+	// time.Now() HERE — at settle time, which for this fallback is past the retry
+	// horizon (minutes to days after the stop), billing the customer for the
+	// outage. The closest observation of the stop is when the event entered the
+	// outbox (the Python runtime stamps stopped_at at emit).
+	if ev.StoppedAt == "" && r.FirstTS > 0 {
+		sec, frac := math.Modf(r.FirstTS)
+		ev.StoppedAt = time.Unix(int64(sec), int64(frac*1e9)).UTC().Format(time.RFC3339Nano)
 	}
 
 	// B-D13: we report what we OBSERVED. We do not price it.

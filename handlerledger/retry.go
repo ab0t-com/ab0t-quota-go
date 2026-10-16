@@ -60,6 +60,7 @@ func runWithRetry(
 	}
 
 	var lastErr error
+attempts:
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := h.Inner(ctx, event, hctx)
 
@@ -107,8 +108,10 @@ func runWithRetry(
 		select {
 		case <-time.After(backoffDelay(cfg, attempt)):
 		case <-ctx.Done():
-			lastErr = fmt.Errorf("retry cancelled: %w", ctx.Err())
-			break
+			// v0.1.10 (ticket 20261016, B-15): leave the LOOP — a bare `break`
+			// only left the select and the handler ran again on a dead context.
+			lastErr = fmt.Errorf("retry cancelled: %w (last error: %v)", ctx.Err(), lastErr)
+			break attempts
 		}
 	}
 

@@ -134,9 +134,9 @@ func TestHealthy_FailsOnMissingOrFailedReachability_GO10(t *testing.T) {
 		BillingStatus: "OFF (paid disabled)", Reconciler: "OFF — not requested",
 		FloatStore: "redis", RedisTopology: TopologySingleNode,
 		CounterEvictionPolicy: "noeviction", RedisScripting: "on (EVAL verified)",
-		PreflightReverification: "on (rides the reconciler loop)",
+		PreflightReverification:  "on (rides the reconciler loop)",
 		CounterEvictionsObserved: "0 (no keys evicted on this server)",
-		RedisPersistStatus: "ok", MemoryHeadroom: "ok",
+		RedisPersistStatus:       "ok", MemoryHeadroom: "ok",
 	}
 	for _, tc := range []struct {
 		name    string

@@ -323,12 +323,19 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
 ```
 
 Your gateway service URL + this path is what you'll register with
-ab0t-auth in Stage 6.
+ab0t-auth in Stage 6. (v0.1.9 answered `404` on this mount; there, wrap the
+receiver in `http.StripPrefix("/api/quotas", …)` and mount it at `/api/quotas/`.)
 
 ### 5b. Implement `CreditGranter`
 
 This is the callback the library uses when an auth event resolves to a
 credit grant. The body of `GrantCredit` is **the moment money lands**.
+
+Since v0.1.10 the library ships one: `CreditGranter: quota.BillingCreditGranter(nil)`
+(billing's real promotional-credit / apply-credit-grant routes, idempotency key
+`in.IdempotencyKey`). The hand-written form below also works on v0.1.10; on v0.1.9
+`bc.GrantCredit` posted to a route billing does not serve, so call
+`POST /billing/{org}/promotional-credit` yourself there.
 
 ```go
 import (
@@ -347,7 +354,7 @@ func (g gatewayGranter) GrantCredit(ctx context.Context,
         OrgID:   in.OrgID,
         TierID:  in.TierID,
         Amount:  in.Amount,
-        EventID: in.EventID,    // ledger uses this for idempotency
+        IdempotencyKey: in.IdempotencyKey, // billing dedups on this — stable across redeliveries
         Reason:  "auth_event:" + in.Trigger,
     })
     return err

@@ -11,10 +11,10 @@ Eight subcommands. Each takes `--help` for full flags.
 
 ```bash
 # Option 1 — from source (needs Go toolchain)
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.0
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10
 
 # Option 2 — download prebuilt
-VERSION=v0.1.0
+VERSION=v0.1.10
 OS=$(uname | tr A-Z a-z)
 ARCH=amd64  # or arm64
 curl -L -o quotactl \
@@ -39,10 +39,16 @@ quotactl subscribe-events \
 Required env: `AB0T_AUTH_AUTH_URL`, `AB0T_AUTH_ADMIN_TOKEN`,
 `AB0T_AUTH_WEBHOOK_PUBLIC_URL`, `AB0T_AUTH_WEBHOOK_SECRET`.
 
-GETs existing subscriptions first; only POSTs create on no-match. Safe
-to run repeatedly. Use during deploy or once by hand. Use
-`--org-slug <slug>` to filter to a single org by login slug, or
-`--org-id <id>` if you already know it.
+GETs existing subscriptions first (every page); only POSTs create on
+no-match. Safe to run repeatedly. Use `--org-slug <slug>` to filter to a
+single org by login slug, or `--org-id <id>` if you already know it.
+
+v0.1.10: any failure exits non-zero with the HTTP status (v0.1.9 exited 0
+with an empty `subscription_id:` — read the id there). An existing
+subscription with other events, or (where auth discloses it) another
+secret, is an error naming `--rotate-secret`, which deletes and re-creates
+it with the current secret and `--events` — the only way to rotate a
+secret, since auth cannot edit one.
 
 ### events — query the ledger
 
@@ -55,18 +61,19 @@ quotactl events --status success --limit 200
 Must pass at least one of `--user` or `--status`. Output is one JSON row
 per line — pipe to `jq` for filtering.
 
-**Note (v0.1.0):** ledger is in-memory only. Run this from the service's
-process address space (e.g. via an admin RPC) — running the CLI alone
-sees an empty store. v0.2 wires Redis + DDB backends and CLI reads them
-directly.
+**Note:** the standalone CLI cannot reach your service's ledger. v0.1.9
+printed an empty result (exit 0); v0.1.10 refuses with a non-zero exit.
+Query `q.LedgerStore.QueryByUser` / `QueryByStatus` inside your service
+(e.g. an admin route). `delete-user` behaves the same way — use
+`q.LedgerStore.DeleteUser` for a deletion request.
 
 ### replay — re-send saved events to a receiver
 
 ```bash
 quotactl replay \
   --file events.jsonl \
-  --target https://your-svc.example.com/api/quotas/_webhooks/auth \
-  --secret "$AB0T_AUTH_WEBHOOK_SECRET"
+  --target https://your-svc.example.com/api/quotas/_webhooks/auth
+# the HMAC secret is read from AB0T_AUTH_WEBHOOK_SECRET (avoid --secret: argv is visible in ps)
 ```
 
 Accepts JSONL (one event per line) or a JSON array. Signs each with HMAC
@@ -80,9 +87,11 @@ Use `--bare` if the receiver expects bare-hex (no `sha256=` prefix).
 ```bash
 quotactl backfill \
   --input users.csv \
-  --target https://svc.example.com/api/quotas/_webhooks/auth \
-  --secret "$AB0T_AUTH_WEBHOOK_SECRET"
+  --target https://svc.example.com/api/quotas/_webhooks/auth   # secret from AB0T_AUTH_WEBHOOK_SECRET
 ```
+
+v0.1.10: `replay` and `backfill` exit non-zero if any event is not
+accepted (v0.1.9 exited 0 and only printed the status).
 
 `users.csv` format (one per line, `#` comments OK):
 
@@ -175,9 +184,12 @@ auth events list --since 2026-06-10 > events.jsonl
 
 # 2. Replay through your receiver
 quotactl replay --file events.jsonl \
-  --target https://svc/api/quotas/_webhooks/auth \
-  --secret "$AB0T_AUTH_WEBHOOK_SECRET"
+  --target https://svc/api/quotas/_webhooks/auth   # secret from AB0T_AUTH_WEBHOOK_SECRET
 ```
+
+Replay re-posts the SAME event ids: an event whose ledger row is already
+`failed_permanent` (or `success`) is a no-op. To re-try a failed grant,
+use `backfill` (new event ids; business dedup keeps granted users no-ops).
 
 ### Legacy user backfill
 
@@ -222,7 +234,7 @@ cd ab0t-quota-go
 make install   # → $GOBIN/quotactl
 
 # Cross-compile all platforms
-make dist VERSION=v0.1.0
+make dist VERSION=v0.1.10
 ls release/v0.1.0/
 ```
 

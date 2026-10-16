@@ -176,7 +176,7 @@ func TestSTKeyspace1ConfigKeysStrictAndGoV2NotYetWired(t *testing.T) {
 	base := func() *config.Config {
 		return &config.Config{
 			ServiceName: "svc-a",
-			Tiers: []config.Tier{{TierID: "free", DisplayName: "Free"}},
+			Tiers:       []config.Tier{{TierID: "free", DisplayName: "Free"}},
 		}
 	}
 	c := base()

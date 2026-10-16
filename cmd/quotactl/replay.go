@@ -35,8 +35,11 @@ events are short-circuited.
 Bare-hex signing (--bare): the receiver accepts both "sha256=<hex>" and
 "<hex>". Use --bare if your target rejects the prefixed form.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if secret == "" {
+				secret = os.Getenv("AB0T_AUTH_WEBHOOK_SECRET")
+			}
 			if file == "" || targetURL == "" || secret == "" {
-				return errors.New("--file, --target, and --secret are required")
+				return errors.New("--file and --target are required, and --secret (or AB0T_AUTH_WEBHOOK_SECRET)")
 			}
 			raw, err := os.ReadFile(file)
 			if err != nil {
@@ -49,6 +52,7 @@ Bare-hex signing (--bare): the receiver accepts both "sha256=<hex>" and
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			client := &http.Client{Timeout: 15 * time.Second}
+			failed := 0
 			for i, ev := range events {
 				sig := authevents.SignBody(ev, secret)
 				if !bareSig {
@@ -61,15 +65,25 @@ Bare-hex signing (--bare): the receiver accepts both "sha256=<hex>" and
 				if err != nil {
 					return fmt.Errorf("event %d: %w", i, err)
 				}
-				body, _ := io.ReadAll(resp.Body)
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 				resp.Body.Close()
-				fmt.Printf("[%d] HTTP %d %s\n", i, resp.StatusCode, truncate(string(body), 120))
+				fmt.Fprintf(cmd.OutOrStdout(), "[%d] HTTP %d %s\n", i, resp.StatusCode, truncate(string(body), 120))
+				if resp.StatusCode < 200 || resp.StatusCode > 299 {
+					failed++
+				}
+			}
+			// v0.1.10: any refused event is a failure (exit non-zero), not a log line.
+			if failed > 0 {
+				return fmt.Errorf("%d of %d events were not accepted by %s (see the HTTP lines above)",
+					failed, len(events), targetURL)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "path to event JSON (one per line or JSON array)")
-	cmd.Flags().StringVar(&secret, "secret", os.Getenv("AB0T_AUTH_WEBHOOK_SECRET"), "HMAC secret")
+	// v0.1.10: NO env default here — pflag prints a non-empty default in --help,
+	// which printed the live secret. The env is read at run time instead.
+	cmd.Flags().StringVar(&secret, "secret", "", "HMAC secret (default: $AB0T_AUTH_WEBHOOK_SECRET; prefer the env — argv is visible in ps)")
 	cmd.Flags().StringVar(&targetURL, "target", "", "receiver URL (https://svc/api/quotas/_webhooks/auth)")
 	cmd.Flags().BoolVar(&bareSig, "bare", false, "send bare-hex signature (no sha256= prefix)")
 	return cmd

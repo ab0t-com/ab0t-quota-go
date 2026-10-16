@@ -99,11 +99,31 @@ func NewUndeclaredError(spec Spec, state string) *ConfigError {
 
 // RedactURL strips userinfo from a URL for logs and errors (design §6.3):
 // scheme/host/port/db survive, credentials never do.
+//
+// v0.1.10 (ticket 20261016, C-06): an UNPARSEABLE URL used to be returned
+// verbatim — password included (a base64 password with "/" is the usual cause).
+// Now everything between "://" and the last "@" of the authority is masked, so
+// the host survives for diagnosis and the credentials never do.
 func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		return raw
+	if err == nil {
+		if u.User == nil {
+			return raw
+		}
+		u.User = nil
+		return u.String() + " (userinfo redacted)"
 	}
-	u.User = nil
-	return u.String() + " (userinfo redacted)"
+	rest := raw
+	scheme := ""
+	if i := strings.Index(raw, "://"); i >= 0 {
+		scheme, rest = raw[:i+3], raw[i+3:]
+	}
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		return scheme + "[redacted]@" + rest[at+1:] + " (unparseable URL; userinfo redacted)"
+	}
+	if strings.ContainsAny(rest, ":") {
+		// No '@' but unparseable: cannot tell credentials from host — show nothing.
+		return scheme + "[unparseable URL redacted]"
+	}
+	return raw + " (unparseable URL)"
 }

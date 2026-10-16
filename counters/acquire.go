@@ -238,7 +238,9 @@ func (s *redisFloatStore) AtomicAcquire(ctx context.Context, idemKey string, has
 	}
 	arr, ok := res.([]any)
 	if !ok || len(arr) != 2 {
-		return AcquireOutcome{}, nil
+		// v0.1.10 (ticket 20261016, A-28): a reply we cannot read is "could not
+		// evaluate" (→ 503 / FailOpen policy), never a silent deny (→ 429).
+		return AcquireOutcome{}, fmt.Errorf("counters: unexpected acquire script reply %T %v", res, res)
 	}
 	admitted := toStr(arr[0]) == "1"
 	reason := toStr(arr[1])
@@ -248,6 +250,11 @@ func (s *redisFloatStore) AtomicAcquire(ctx context.Context, idemKey string, has
 		out.Dup = true
 	case "ok":
 	default:
+		if !admitted {
+			if _, e := strconv.Atoi(reason); e != nil {
+				return AcquireOutcome{}, fmt.Errorf("counters: unexpected acquire script reason %q", reason)
+			}
+		}
 		if idx, e := strconv.Atoi(reason); e == nil {
 			out.DeniedIndex = idx
 		}

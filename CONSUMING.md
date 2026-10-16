@@ -66,7 +66,7 @@ package and `go build` fetches it.
 ### 1. Pin a version in your go.mod
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.1.0
+go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
 ```
 
 Or pin to a specific commit:
@@ -210,7 +210,7 @@ single static binary per (OS, arch).
 If you have a Go toolchain:
 
 ```bash
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.0
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10
 ```
 
 This drops a `quotactl` binary into `$GOBIN` (or `$GOPATH/bin`). It
@@ -221,7 +221,7 @@ builds from source on your machine — no GitHub release needed.
 If you don't want a Go toolchain (the common ops scenario):
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.1.10
 ARCH=amd64                 # or arm64
 OS=$(uname | tr A-Z a-z)    # darwin | linux
 
@@ -243,11 +243,11 @@ Windows users: download `quotactl-windows-amd64.exe` directly.
 ### Subcommands
 
 ```
-quotactl subscribe-events    # idempotent register with auth
-quotactl events --user UID   # tail the ledger
-quotactl replay --file EVENTS.jsonl --target URL --secret HMAC
-quotactl backfill --input USERS.csv --target URL --secret HMAC
-quotactl delete-user --user-id UID    # GDPR
+quotactl subscribe-events [--rotate-secret]   # idempotent register with auth; non-zero on any failure
+quotactl replay --file EVENTS.jsonl --target URL    # secret from AB0T_AUTH_WEBHOOK_SECRET
+quotactl backfill --input USERS.csv --target URL    # same; non-zero if any row is refused
+# events / delete-user cannot reach your service's ledger and refuse (v0.1.10);
+# use q.LedgerStore.QueryByUser / DeleteUser inside the service
 quotactl capabilities --config quota-config.json
 quotactl provision --emit compose     # or terraform | acl | iam — infra artifacts
 quotactl provision --local            # ONE conforming local Docker dev Redis

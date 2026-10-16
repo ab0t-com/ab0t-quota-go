@@ -41,6 +41,11 @@ import (
 	"github.com/ab0t-com/ab0t-quota-go/registry"
 )
 
+// EnvWebhookSecretPrevious names the env var holding the previous auth-event
+// webhook secret(s), comma-separated, accepted alongside AB0T_AUTH_WEBHOOK_SECRET
+// during a rotation (v0.1.10).
+const EnvWebhookSecretPrevious = "AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS"
+
 // Setup is the one-liner. Reads config from disk, builds every subsystem,
 // and reports its capabilities. Consumers wire it once during startup.
 //
@@ -211,7 +216,11 @@ type Capabilities struct {
 	// "v1", "v1+dual(phase=dual)", "v2(phase=reaped)" — so an operator can
 	// see which shape a live process reads/writes (keyspace spec §3).
 	Keyspace string
-	WhyOff         map[string]string
+	WhyOff   map[string]string
+	// ConfigWarnings (v0.1.10) are config.Config.Warnings(): shapes that boot but
+	// silently allow more than intended (enforcement off, a reset_period typo that
+	// never resets, a limit for a resource that does not exist, ...).
+	ConfigWarnings []string
 	// Resolved is the dependency-resolution provenance (T-G5, design §6.2 —
 	// ENV-11's Go twin): WHERE each dependency's effective value came from,
 	// so `quotactl capabilities` shows the resolved plan. Secret values never
@@ -252,6 +261,12 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	}
 
 	cap := Capabilities{Engine: true, WhyOff: map[string]string{}, Resolved: map[string]ResolvedEntry{}}
+	// v0.1.10 (ticket 20261016): shapes that boot but silently fail OPEN — loud,
+	// and readable afterwards. Warnings, not refusals (a refusal is a MINOR).
+	cap.ConfigWarnings = cfg.Warnings()
+	for _, w := range cap.ConfigWarnings {
+		slog.Warn("quota config: " + w)
+	}
 
 	// K-8 (keyspace spec §3.2): the declared keyspace state — config.Validate
 	// has already guarded values; NewKeyspace re-guards the charset/states.
@@ -644,26 +659,60 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	cap.AuthEvents = true
 	secret := os.Getenv("AB0T_AUTH_WEBHOOK_SECRET")
 	cap.Resolved["auth_webhook_secret"] = presenceEntry(secret != "", "env AB0T_AUTH_WEBHOOK_SECRET")
+	// v0.1.10: rotation overlap. Auth cannot change a subscription's secret, so a
+	// rotation re-creates the subscription with the new secret; while deliveries
+	// signed with the old one are in flight, the receiver accepts both. Comma-
+	// separated; unset = no overlap (unchanged behaviour).
+	var previous []string
+	for _, s := range strings.Split(os.Getenv(EnvWebhookSecretPrevious), ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			previous = append(previous, s)
+		}
+	}
+	if len(previous) > 0 {
+		cap.Resolved["auth_webhook_secret_previous"] = presenceEntry(true, "env "+EnvWebhookSecretPrevious)
+		slog.Info("auth-event receiver: accepting the previous webhook secret(s) during rotation — "+
+			"remove "+EnvWebhookSecretPrevious+" once the rotation is complete", "count", len(previous))
+	}
 	q.webhookHandler = authevents.MakeRouter(authevents.ReceiverConfig{
-		Secret:      secret,
-		LedgerStore: q.LedgerStore,
+		Secret:          secret,
+		PreviousSecrets: previous,
+		LedgerStore:     q.LedgerStore,
 	})
 	if secret == "" {
 		cap.WhyOff["auth_events_signed"] = "AB0T_AUTH_WEBHOOK_SECRET not set — receiver will reject all events with 401"
 	}
 
 	// Credit-grant handler — only if a Granter is supplied.
-	if opts.CreditGranter != nil {
-		_, err := authevents.RegisterDefaultCreditGrantHandler(authevents.CreditGrantDeps{
+	granter := opts.CreditGranter
+	if bg, ok := granter.(*billingCreditGranter); ok && bg.c == nil {
+		// v0.1.10: BillingCreditGranter(nil) = "use the billing client Setup builds".
+		if q.Billing == nil {
+			return nil, errors.New("quota.Setup: CreditGranter is quota.BillingCreditGranter(nil) but billing " +
+				"is not wired — set AB0T_QUOTA_BILLING_URL and AB0T_QUOTA_BILLING_TOKEN (your billing key), or " +
+				"pass a *billing.Client. A sign-up grant that can never reach billing must not look wired")
+		}
+		granter = &billingCreditGranter{c: q.Billing}
+	}
+	if granter != nil {
+		h, err := authevents.RegisterDefaultCreditGrantHandler(authevents.CreditGrantDeps{
 			Config:       cfg,
 			TierProvider: providerAdapter{prov},
 			PinStore:     q.PinStore,
 			Ledger:       q.LedgerStore,
-			Granter:      opts.CreditGranter,
+			Granter:      granter,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("quota.Setup: credit grant handler: %w", err)
 		}
+		// v0.1.10 (ticket 20261016, C-09): the handler lives in the package-level
+		// registry; Close removes it, so a second Setup (or a closed Quota) never
+		// leaves a stale handler — old config, old granter — running on events.
+		q.closeFns = append(q.closeFns, func() error {
+			authevents.UnregisterHandler("org.created", h)
+			authevents.UnregisterHandler("user.org_assigned", h)
+			return nil
+		})
 		cap.CreditGrant = true
 	} else {
 		cap.WhyOff["credit_grant"] = "no CreditGranter supplied; default handler not registered"
@@ -734,8 +783,13 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	// so q.Billing (mesh-wired) is known — wiring billing IS an assertion of
 	// paid intent. Explicit override: billing.enable_paid, or Options.EnablePaid.
 	enablePaid := cfg.Billing.EnablePaid || q.Billing != nil
+	paidWhy := "billing.enable_paid=true in the config"
+	if !cfg.Billing.EnablePaid && q.Billing != nil {
+		paidWhy = "AB0T_QUOTA_BILLING_URL is set (wiring billing asserts paid mode)"
+	}
 	if opts.EnablePaid != nil {
 		enablePaid = *opts.EnablePaid
+		paidWhy = "Options.EnablePaid=true"
 	}
 	// D-56/D-63 — auto-wire the concrete SNS settlement publisher from config
 	// when the consumer didn't supply one, so a config-only paid service gets a
@@ -750,10 +804,17 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		}
 	}
 	if err := q.gateBillingChain(ctx, cfg, redisClient, publisher, enablePaid, opts.SkipBackgroundLoops, &cap); err != nil {
-		return nil, err
+		// v0.1.10 (ticket 20261016, C-23): say WHY paid mode is on and how to opt out —
+		// the usual cause is setting AB0T_QUOTA_BILLING_URL for credit grants alone.
+		return nil, fmt.Errorf("%w. Paid mode is on because %s; if this service does not meter "+
+			"usage into billing yet (limits and/or sign-up credit only), pass Options.EnablePaid=&false", err, paidWhy)
 	}
 
+	// v0.1.10 (ticket 20261016, C-08): the reconciler goroutine (started above) may
+	// already be writing q.capability under capMu — publish under the same lock.
+	q.capMu.Lock()
 	q.capability = cap
+	q.capMu.Unlock()
 	logCapabilities(cap)
 	return q, nil
 }
@@ -863,6 +924,8 @@ func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisC
 // that FAILS while any link is missing — D-56/D-40). A missing link is not
 // healthy; it is unknown, and unknown is unhealthy (D-51).
 func (q *Quota) BillingHealthy() (bool, string) {
+	q.capMu.RLock()
+	defer q.capMu.RUnlock()
 	if strings.HasPrefix(q.capability.BillingStatus, "ON") {
 		return true, q.capability.BillingStatus
 	}
@@ -1137,7 +1200,11 @@ func connectDeclaredRedis(ctx context.Context, url, password, source string,
 func newRedisClient(ctx context.Context, redisURL, redisPassword string) (*redis.Client, error) {
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse redis_url: %w", err)
+		// v0.1.10 (C-06): never wrap the parse error — it embeds the whole URL,
+		// password included.
+		return nil, fmt.Errorf("parse redis_url %s: not a valid redis URL — percent-encode reserved "+
+			"characters in the password (/ ? # @ :) or move it to storage.redis_password",
+			config.RedactURL(redisURL))
 	}
 	if redisPassword != "" {
 		// D-5(a) / ST-RESOLVE-1 clause 5: the separately-declared field wins

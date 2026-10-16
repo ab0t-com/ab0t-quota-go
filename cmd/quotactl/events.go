@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"time"
 
@@ -21,18 +20,20 @@ func newEventsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "events",
 		Short: "Query the ledger for handler attempts/outcomes",
-		Long: `Lists ledger rows. Backed by the configured ledger store
-(memory in v0.1.0; Redis/DDB in v0.2). Filter by user or by status.`,
+		Long: `Lists ledger rows. NOTE (v0.1.10): the standalone CLI cannot reach your
+service's handler ledger, so this verb refuses (non-zero) instead of printing an
+empty result; query q.LedgerStore inside your service.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, backend := storeFromEnv()
-			fmt.Fprintln(os.Stderr, "ledger backend:", backend)
 			if userID == "" && status == "" {
 				return errors.New("specify at least one of --user or --status")
+			}
+			store, err := storeFromEnv()
+			if err != nil {
+				return err
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			var rows []*handlerledger.LedgerRow
-			var err error
 			opt := handlerledger.QueryOptions{Limit: limit}
 			if userID != "" {
 				rows, err = store.QueryByUser(ctx, userID, opt)

@@ -17,10 +17,10 @@ func mintActivationID() string {
 
 func TestIdempotencyKeyHasUniqueComponent_Accepts(t *testing.T) {
 	cases := map[string]string{
-		"empty (no idempotency requested)": "",
-		"dashed uuid":                      "counter:lifecycle:end:abc:550e8400-e29b-41d4-a716-446655440000",
-		"evt marker":                       "counter:lifecycle:end:desktop-abc123:evt:whatever",
-		"trailing numeric generation":      "counter:lifecycle:end:desktop-abc123:7",
+		"empty (no idempotency requested)":               "",
+		"dashed uuid":                                    "counter:lifecycle:end:abc:550e8400-e29b-41d4-a716-446655440000",
+		"evt marker":                                     "counter:lifecycle:end:desktop-abc123:evt:whatever",
+		"trailing numeric generation":                    "counter:lifecycle:end:desktop-abc123:7",
 		"generation in the middle (bundle-suffixed key)": "counter:lifecycle:end:desktop-abc123:7:sandbox.desktop_sessions",
 		"gen: prefixed segment":                          "counter:lifecycle:end:desktop-abc123:gen:12",
 		"opaque token_hex(16)":                           "release:" + "act_" + "0123456789abcdef0123456789abcdef",

@@ -11,11 +11,11 @@ field on the returned `*quota.Quota`.
 ## Install
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@latest
+go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
 ```
 
-Public Go module — no `GOPRIVATE` needed. The git tag IS the release;
-`@v0.1.0` and `@latest` both work.
+Public Go module — no `GOPRIVATE` needed. The git tag IS the release.
+Pin a tag and read the CHANGELOG (and `migrations/`) on every bump.
 
 ## Minimum viable Setup
 
@@ -50,10 +50,10 @@ defer q.Close(context.Background())
 ## Config search paths
 
 When `ConfigPath` is empty, `LoadConfig` looks for:
-1. `$AB0T_QUOTA_CONFIG_PATH` if set
+1. `$QUOTA_CONFIG_PATH` if set (NOT `AB0T_QUOTA_CONFIG_PATH` — that name is
+   not read; since v0.1.10 setting it logs a warning)
 2. `./quota-config.json`
-3. `./config/quota-config.json`
-4. `/etc/ab0t-quota/quota-config.json`
+3. `/etc/ab0t/quota-config.json`
 
 First hit wins. See [ab0t-quota-go-config](../ab0t-quota-go-config/SKILL.md)
 for the schema.

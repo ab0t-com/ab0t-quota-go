@@ -3,8 +3,11 @@ package billing
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
+
+	"github.com/ab0t-com/ab0t-quota-go/internal/httpx"
 )
 
 // HeartbeatLoop sends Heartbeat every interval until ctx is cancelled.
@@ -55,6 +58,14 @@ func (h *HeartbeatLoop) run(ctx context.Context) {
 			if err := h.Client.Heartbeat(ctx, HeartbeatRequest{
 				ServiceName: h.ServiceName, Version: h.Version,
 			}); err != nil {
+				// v0.1.10 (ticket 20261016): billing serves no heartbeat route. A
+				// 404/405 is a permanent answer, not a transient failure — stop,
+				// once, instead of a warning every interval forever.
+				if httpx.IsStatus(err, http.StatusNotFound) || httpx.IsStatus(err, http.StatusMethodNotAllowed) {
+					slog.Info("billing heartbeat: billing serves no heartbeat route — heartbeat stopped " +
+						"(harmless; nothing depends on it)")
+					return
+				}
 				slog.Warn("billing heartbeat failed", "err", err)
 			}
 		}

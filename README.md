@@ -1,130 +1,207 @@
 # ab0t-quota-go
 
 Go port of [ab0t-quota](https://github.com/ab0t-com/ab0t-quota) (Python).
-A drop-in client library for ab0t mesh consumers that gives any Go service
-quota enforcement, tier management, billing/payment integration, and an
-auth-event handler framework — by talking to ab0t backend services on your
-behalf.
+A client library for ab0t mesh consumers: tier-aware quota enforcement for
+your HTTP API, sign-up credit grants driven by auth events, and (optionally)
+durable usage settlement with the billing service.
 
 ## What this is
 
-ab0t-quota-go is the **Go SDK for the ab0t mesh**. Your Go service uses it
-to:
+Your Go service uses it to:
 
-1. **Enforce quotas** — concurrent resources, request rates, monthly spend
-   caps. Tier-aware (free / starter / pro / enterprise — or whatever you
-   call them). Sub-5 ms p99 in `byo_redis` mode.
-2. **Read tier + balance** — without rolling your own clients for
-   `billing.service.ab0t.com` and `payment.service.ab0t.com`.
-3. **React to auth events** — `auth.user.registered`,
-   `auth.user.login`, `org.created`, `auth.permission.granted`, etc.
-   The library mounts the webhook receiver, verifies HMAC, dispatches
-   to your handlers, and auto-subscribes with auth at startup.
-4. **Grant credits idempotently** — built-in delivery dedup,
-   business-key dedup, exponential-backoff retry, ledger persistence,
-   and CLI replay. Three storage backends (DynamoDB, Redis, in-memory)
-   pick themselves based on what's available.
+1. **Enforce quotas** — request rates, monthly accumulators, concurrent
+   resources (gauges), per tier (`free` / `pro` / … — your names), from one
+   `quota-config.json`. Counters live in your Redis (or `"memory://"` for a
+   single dev process).
+2. **Grant sign-up credit exactly once** — auth sends a signed event when an
+   org is created or a user joins one; the library verifies it, resolves the
+   tier, dedups, and grants the tier's `credit_grant` (trigger `signup`)
+   through billing.
+3. **Settle metered usage with billing** (paid mode) — through a durable
+   outbox, so a crash or a billing outage never loses or double-charges a
+   usage event. Paid mode refuses to start without the whole chain.
 
-It is positioned as a **drop-in** — the goal is "two env vars, one JSON
-config, one library call." Your service should not need to learn about
-ab0t-mesh internals to use this.
+Every subsystem reports whether it is on and why in `q.Capabilities()`, and
+`q.Healthy()` fails when a money-relevant part is missing.
 
-## Why someone might use it
+## Install (pin a version)
 
-You are a Go-based SaaS service and you want any of:
+```bash
+go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10   # the CLI
+```
 
-- A free-tier with $X of compute credit at signup, anti-farming included
-- A pricing page wired to real plans + a checkout flow that actually
-  takes money via Stripe
-- Tier-based rate limits with human-readable 429 messages
-- Per-user spend caps inside an org
-- Idempotent event handlers for things like "send a welcome email on
-  signup" or "provision an account in our system on org.created"
+Pre-1.0: read the [CHANGELOG](CHANGELOG.md) (and `migrations/` when present)
+before every bump.
 
-…and you do **not** want to write Stripe webhook code, manage your
-own webhook subscription with another auth provider, design retry
-machinery for "the third-party webhook fired twice," or roll your own
-DynamoDB counter table.
+## Minimal example
 
-ab0t-quota-go gives you all of that with one `quota.Setup(...)` call.
-
-## How to use it (minimal example)
+This is [`examples/basic/main.go`](examples/basic/main.go) verbatim (a test
+keeps the two identical, and another boots it and drives it past its limit).
+Run it from the repo root with
+`QUOTA_CONFIG_PATH=examples/basic/quota-config.json go run ./examples/basic`.
 
 ```go
+// Minimal ab0t-quota integration: load config, guard one route, count usage
+// after the work, expose an exempt /healthz. Run from the repo root with:
+//
+//	QUOTA_CONFIG_PATH=examples/basic/quota-config.json go run ./examples/basic
+//	curl -s -H 'X-Demo-User: alice' localhost:8080/api/echo    # 100/hour, then 429
+//
+// The config declares "memory://" counters (one process, dev only). Point
+// storage.redis_url (or QUOTA_REDIS_URL) at your Redis before you run replicas.
 package main
 
 import (
-    "context"
-    "log"
-    "net/http"
-    "os"
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
-    "github.com/ab0t-com/ab0t-quota-go/quota"
-    "github.com/ab0t-com/ab0t-quota-go/authevents"
+	"github.com/ab0t-com/ab0t-quota-go/engine"
+	"github.com/ab0t-com/ab0t-quota-go/quota"
 )
 
-// orgFromRequest extracts the org_id from your auth middleware's context.
-// (The lib doesn't know about your auth — supply your own.)
-func orgFromRequest(r *http.Request) string  { return r.Header.Get("X-Org-ID") }
-func userFromRequest(r *http.Request) string { return r.Header.Get("X-User-ID") }
+type ctxKey string
+
+const (
+	userKey ctxKey = "user_id"
+	orgKey  ctxKey = "org_id"
+)
+
+// demoAuth stands in for YOUR auth middleware: it must validate the caller's
+// token first and then put the verified user and org in the request context.
+// Never trust identity headers from the client in production — this demo does,
+// only so it runs with curl.
+func demoAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := r.Header.Get("X-Demo-User")
+		ctx := context.WithValue(r.Context(), userKey, u)
+		ctx = context.WithValue(ctx, orgKey, "org-"+u) // one org per demo user
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func identity(r *http.Request) (string, string, error) {
+	u, _ := r.Context().Value(userKey).(string)
+	o, _ := r.Context().Value(orgKey).(string)
+	return u, o, nil
+}
+
+// newMux wires the quota guard around the API. Split out of main so the
+// example is tested (examples/basic/main_test.go).
+func newMux(q *quota.Quota) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	guard := q.Middleware(quota.MiddlewareDeps{
+		Identity: identity,
+		Router: func(r *http.Request) (string, float64) {
+			return "api.requests", 1 // in real apps, derive the resource from the route
+		},
+		Exempt: []string{"/healthz"},
+	})
+
+	mux.Handle("/api/echo", demoAuth(guard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+		// The guard only CHECKS. Count the usage after the work succeeded —
+		// without this the limit is never reached.
+		u, o, _ := identity(r)
+		if _, err := q.Spend(r.Context(), engine.CheckInput{UserID: u, OrgID: o, ResourceKey: "api.requests", Cost: 1}); err != nil {
+			log.Printf("quota spend: %v", err) // the work happened: log, reconcile later
+		}
+	}))))
+	return mux
+}
 
 func main() {
-    ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-    // 1. One setup call wires the engine, /api/quotas/* endpoints,
-    //    rate-limit middleware, billing/payment proxy routes, lifespan
-    //    workers, and the auth-event webhook receiver.
-    qctx, err := quota.Setup(ctx, quota.Config{
-        ConfigPath:    "quota-config.json",                 // typed JSON config
-        MeshAPIKey:    os.Getenv("AB0T_MESH_API_KEY"),      // your mesh credential
-        ConsumerOrg:   os.Getenv("AB0T_CONSUMER_ORG_ID"),   // your service's mesh org UUID
-        WebhookSecret: os.Getenv("AB0T_AUTH_WEBHOOK_SECRET"), // optional; mounts the receiver
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer qctx.Close()
+	q, err := quota.Setup(ctx, quota.Options{}) // QUOTA_CONFIG_PATH, else ./quota-config.json
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer q.Close(context.Background())
 
-    // Setup logs a capability report — what was enabled, what was skipped and why.
-    // Useful to read at startup: "why didn't credits grant?" answers in one line.
-    log.Printf("quota capabilities: %+v", qctx.Capabilities())
-
-    // 2. Register an auth-event handler (similar to the Python @on_auth_event)
-    authevents.OnAuthEvent("auth.user.registered", authevents.HandlerFunc(
-        func(ctx context.Context, event authevents.Event) error {
-            log.Printf("new user signed up: %s", event.UserID())
-            return nil
-        },
-    ))
-
-    // 3. Mount on your own http.ServeMux
-    mux := http.NewServeMux()
-    qctx.Mount(mux, "/api")  // mounts /api/quotas/*, /api/billing/*, etc.
-
-    // 4. Enforce quota in your own route
-    mux.HandleFunc("/widgets", func(w http.ResponseWriter, r *http.Request) {
-        if err := qctx.CheckBundle(r.Context(), orgFromRequest(r), "widget",
-            quota.WithUserID(userFromRequest(r))); err != nil {
-            quota.WriteDenial(w, err)  // writes the standard 429 body + headers
-            return
-        }
-        // ...provision the widget...
-        _ = qctx.IncrementBundle(r.Context(), orgFromRequest(r), "widget",
-            quota.WithUserID(userFromRequest(r)))
-    })
-
-    http.ListenAndServe(":8080", mux)
+	srv := &http.Server{Addr: ":8080", Handler: newMux(q)}
+	go func() {
+		log.Println("listening on :8080")
+		_ = srv.ListenAndServe()
+	}()
+	<-ctx.Done()
+	_ = srv.Shutdown(context.Background())
 }
 ```
 
-> The `testdata/quota-config.example.json` referenced below is **planned** —
-> use the Python repo's `quota-config.example.json` as the source-of-truth
-> schema reference until the Go testdata is bundled in Phase 1a.
+The rules this example teaches:
 
-That's the whole API surface for 95% of consumers. Configuration lives
-in a single typed JSON file (`quota-config.json`); see the bundled
-[`testdata/quota-config.example.json`](testdata/quota-config.example.json)
-for the schema.
+- **Check before, spend after.** `q.Middleware` only *checks* (and writes the
+  `X-Quota-*` headers). Usage moves only when you call `q.Spend` after the
+  work succeeded; gauges go up with `q.Spend` and down with `q.Release` on
+  every termination path.
+- **Identity comes from your auth middleware.** The library never validates a
+  token. Validate first, then hand the verified user and org to `Identity`.
+- **`storage.redis_url` is required.** `"memory://"` is the explicit
+  single-process declaration; anything else is your Redis (single node, no
+  eviction, Lua allowed — `quotactl provision --local` starts a conforming one).
+
+### What your customers see
+
+| Status | When | Body |
+|---|---|---|
+| `429` | over the tier limit (also `tier_not_in_config`, `global_kill_switch`) | `{"detail","reason","resource","tier","used","limit","upgrade_url"}` |
+| `503` | the engine could not decide (Redis down, unknown `resource_key`) and `FailOpen` is false | `{"detail":"quota engine error"}` |
+| `401` | your `Identity` func returned an error | `{"detail":"identity required"}` |
+
+Allowed responses carry `X-Quota-Resource`, `X-Quota-Tier`, `X-Quota-Reason`,
+`X-Quota-Limit`, `X-Quota-Remaining`, `X-Quota-Used`, and `X-Quota-Warning`
+near a threshold. `Retry-After` is not sent on a `429` today; clients should back off on their own.
+
+## Sign-up credit (auth events)
+
+```go
+paidOff := false
+q, err := quota.Setup(ctx, quota.Options{
+    CreditGranter: quota.BillingCreditGranter(nil), // billing's real credit routes (v0.1.10)
+    EnablePaid:    &paidOff,                         // credit grants only: no outbox needed yet
+})
+mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
+```
+
+- The tier needs `"credit_grant": {"trigger": "signup", "amount_per_period": "5.00",
+  "destination": "credit_balance", "lifecycle": "persistent", ...}`. Only
+  `trigger: "signup"` grants on auth events (v0.1.10).
+- `BillingCreditGranter(nil)` uses the billing client `Setup` builds from
+  `AB0T_QUOTA_BILLING_URL` + `AB0T_QUOTA_BILLING_TOKEN` (needs
+  `billing.write.transactions`). A `credit_balance`/`persistent` grant goes to
+  `POST /billing/{org}/promotional-credit` (billing's gift caps apply); any
+  other bucket or lifecycle to `POST /billing/{org}/apply-credit-grant`. The
+  idempotency key is derived from the grant (`user:{user}:initial_credit:{tier}`
+  by default), never from the delivery, so a retried or replayed event can never
+  grant twice.
+- Setting `AB0T_QUOTA_BILLING_URL` also asserts paid mode, which refuses to start
+  without the durable outbox. For credit grants only, pass `EnablePaid: &false`
+  (as above) until you wire metering.
+- Mount the receiver at the path you register with auth. Since v0.1.10 it
+  answers any path ending in `/_webhooks/auth`, so the full-path mount above, a
+  subtree mount and `http.StripPrefix("/api/quotas", …)` all work.
+- Register once, loudly: `quotactl subscribe-events --events org.created,user.org_assigned`
+  (exits non-zero on any failure). `Options.AutoSubscribeAuthEvents` re-checks at
+  every boot, best-effort.
+- Rotate the shared secret: deploy with the new value in `AB0T_AUTH_WEBHOOK_SECRET`
+  and the old one in `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` (both verify), run
+  `quotactl subscribe-events --rotate-secret` (auth cannot edit a secret, so this
+  deletes and re-creates the subscription), backfill sign-ups from the seconds in
+  between with `quotactl backfill`, then drop the `_PREVIOUS` variable.
+- A grant that keeps failing (billing down for longer than the ~3 s retry
+  budget) ends as `failed_permanent` for that event id; re-posting the same
+  event is a no-op. Fix the cause and re-send with `quotactl backfill` (new
+  event ids; already-granted users are no-ops).
 
 ## Keeping usage correct (self-healing counters)
 
@@ -167,101 +244,82 @@ for the full contract and `Status` values.
 
 ## Idempotency for handlers that touch money
 
-For handlers with **side effects on money or persistent state**, use
-the `handlerledger.Idempotent` middleware:
+For your own handlers with side effects, wrap them with `authevents.Idempotent`:
+delivery dedup on `(handler, event_id)`, optional business dedup on your `Key`,
+retries with backoff, and a ledger row per outcome. Full example:
+[`examples/with_idempotent/main.go`](examples/with_idempotent/main.go).
 
 ```go
-import "github.com/ab0t-com/ab0t-quota-go/handlerledger"
-
-authevents.OnAuthEvent("auth.user.registered",
-    handlerledger.Idempotent(handlerledger.IdempotentConfig{
-        Handler: "grant_initial_credit",
-        Key: func(e authevents.Event) string {
-            return authevents.ComposeCreditDedupKey(
-                "per_user_per_tier",
-                e.UserID(), e.OrgID(), "free",
-            )
-        },
-        // Retry: 3 attempts exponential backoff by default.
-        // Pass Retry: handlerledger.NoRetry to disable.
-    }, func(ctx context.Context, event authevents.Event, hctx *handlerledger.Context) error {
-        if done, _ := hctx.AlreadyDone(ctx); done {
-            return hctx.Skip("already granted")
+h := authevents.Idempotent(handlerledger.IdempotentConfig{
+    Handler: "payment_credit_topup",
+    Key: func(e handlerledger.Event) string { // "" = no business dedup
+        ev, _ := e.(authevents.Event)
+        pid, _ := ev.Data["payment_id"].(string)
+        if pid == "" {
+            return ""
         }
-        if err := billing.GrantCredit(ctx, event.OrgID(), 10); err != nil {
-            return err  // lib will retry per policy
-        }
-        return hctx.MarkDone(ctx, "txn_abc")
-    }))
+        return "topup:" + pid
+    },
+}, func(ctx context.Context, e handlerledger.Event, hctx *handlerledger.Context) error {
+    if done, err := hctx.AlreadyDone(ctx); err != nil {
+        return err // retried
+    } else if done {
+        return hctx.Skip("already topped up")
+    }
+    // ... the side effect, with hctx.DedupKey as the provider's idempotency key ...
+    _ = hctx.MarkDone(ctx, e.GetEventID())
+    return hctx.Success(e.GetEventID())
+})
+authevents.OnAuthEvent("payment.succeeded", h)
 ```
 
-What you get for free: delivery dedup (auth retries don't double-fire),
-business dedup (your `Key` function controls the policy),
-exponential-backoff retry, full ledger persistence, and a CLI to query
-+ replay everything.
+A plain `authevents.HandlerFunc` has no dedup: a redelivered event runs it
+again. Use it only for side effects that are safe to repeat.
 
 ## CLI
 
 ```bash
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@latest
-
-# Register the auth-event subscription
-quotactl subscribe-events --endpoint https://yours.com/api/quotas/_webhooks/auth
-
-# Query the handler ledger
-quotactl events --user-id u123
-quotactl events --status failed --since 1h
-
-# Re-fire a handler from the stored event snapshot
-quotactl replay --handler grant_initial_credit --event-id evt_xxx
-
-# Backfill users who pre-existed your handler
-quotactl backfill --handler grant_initial_credit --user-ids u1,u2,u3 --org-id <eu-org>
-
-# GDPR cascade
-quotactl delete-user --user-id u123 --confirm
-
-# Emit conforming infra artifacts (never creates cloud resources)
-quotactl provision --emit compose      # or terraform | acl | iam
-quotactl provision --local             # one verified local dev Redis
-
-# Grade production posture before go-live (runs full Setup — stated in output)
-quotactl doctor --config quota-config.json --json
+quotactl subscribe-events [--events a,b] [--prefix /api] [--org-slug S | --org-id ID] [--rotate-secret]
+quotactl replay   --file EVENTS.jsonl --target https://svc/api/quotas/_webhooks/auth
+quotactl backfill --input USERS.csv  --target https://svc/api/quotas/_webhooks/auth [--dry-run]
+quotactl capabilities --config quota-config.json   # runs Setup: connects to Redis, may create declared DDB tables
+quotactl doctor --config quota-config.json --json  # production-posture grading (same honesty note)
+quotactl provision --emit compose|terraform|acl|iam  # infra artifacts; never creates cloud resources
+quotactl provision --local                          # one conforming local dev Redis
+quotactl --version
 ```
 
-## Per-feature env-var matrix
+`replay` and `backfill` read the HMAC secret from `AB0T_AUTH_WEBHOOK_SECRET`
+(prefer it to `--secret`, which is visible in `ps`). Every verb exits non-zero
+when anything it was asked to do did not happen (v0.1.10). `events` and
+`delete-user` cannot reach your service's ledger from outside and say so; run
+`q.LedgerStore.QueryByUser` / `DeleteUser` inside your service.
 
-"Two env vars" is true for quota-only mode. Full paid + events mode needs more. The lib's `Capabilities()` report logs exactly which features turned on or off and why; this is the matrix it's checking:
+## Environment variables
 
-| Feature | Required env | Optional env | What turns off without it |
-|---|---|---|---|
-| Quota check + tier resolution | `AB0T_MESH_API_KEY`, config file | `AB0T_MESH_BILLING_API_KEY` | nothing — quota always works (engine + middleware) |
-| `/api/billing/*` + `/api/payments/*` proxy routes | `AB0T_CONSUMER_ORG_ID` | `AB0T_MESH_PAYMENT_API_KEY` | proxy routes not mounted; `Capabilities().Paid == false` with reason |
-| Auth-event receiver | `AB0T_AUTH_WEBHOOK_SECRET` | — | `/api/quotas/_webhooks/auth` not mounted; no handler dispatch |
-| Auto-subscribe with auth | + `AB0T_AUTH_ADMIN_TOKEN` + `AB0T_AUTH_WEBHOOK_PUBLIC_URL` + `AB0T_AUTH_AUTH_URL` | `AB0T_AUTH_WATCH_ORG_SLUG` | receiver still works but operator must register the subscription manually |
-| Stripe subscription credits | `AB0T_QUOTA_STRIPE_WEBHOOK_SECRET` | — | tier configs with `billing_model: subscription_with_credits` fail loudly at load (in v0.1.0); v0.2 ports the webhook proxy |
-| Lifecycle SNS fan-out | `AB0T_MESH_SNS_LIFECYCLE_TOPIC_ARN` | — | cost recording still works; SNS publish is no-op |
-| Persistent ledger (DDB) | `AB0T_QUOTA_DDB_TABLE` (or `app.state.ddb_client`) | — | falls back to Redis (72h TTL) or InMemory (loud warning) |
+Only these names are read; generic names other services use are ignored on purpose:
 
-Full env-var inventory in `PRODUCT_SPEC.md` §12.
+| Variable | Used for |
+|---|---|
+| `QUOTA_CONFIG_PATH` | config file (else `./quota-config.json`, then `/etc/ab0t/quota-config.json`) |
+| `QUOTA_REDIS_URL` | counter store when `storage.redis_url` is empty; `${QUOTA_*}` refs in the config file expand from env |
+| `AB0T_QUOTA_BILLING_URL`, `AB0T_QUOTA_BILLING_TOKEN` | billing client; setting the URL asserts paid mode |
+| `AB0T_QUOTA_PAYMENT_URL`, `AB0T_QUOTA_PAYMENT_TOKEN` | payment client |
+| `AB0T_QUOTA_SERVICE_TOKEN` | fallback key for both of the above |
+| `AB0T_AUTH_WEBHOOK_SECRET` | auth-event HMAC secret (unset = every event is refused with 401) |
+| `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` | also accepted during a secret rotation (comma-separated) |
+| `AB0T_AUTH_AUTH_URL`, `AB0T_AUTH_ADMIN_TOKEN`, `AB0T_AUTH_WEBHOOK_PUBLIC_URL` | `subscribe-events` / auto-subscribe |
+| `AB0T_QUOTA_REDIS_DURABILITY_CONFIRMED`, `AB0T_QUOTA_REDIS_CLUSTER_CONFIRMED_DISABLED`, `AB0T_QUOTA_DDB_PITR_CONFIRMED` | operator assertions where the server cannot report it (see `examples/basic/quota-config.json` comments) |
+| `AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS` | allow `metered_billing` / `one_time_purchase` |
+| `AB0T_QUOTA_STRICT_IDEMPOTENCY_KEYS` | refuse malformed counter idempotency keys |
+| `AWS_REGION`, `AWS_ENDPOINT_URL` (+ the AWS SDK chain) | DynamoDB / SNS when declared in config |
 
 ## How it compares to the Python lib
 
-Same contracts, same JSON config schema, same auth-event registry
-semantics, same CLI subcommands, same storage backends, same dedup
-policies. Idiomatic Go where there's no direct Python analogue:
-
-- Decorators → functional middleware (`handlerledger.Idempotent(cfg, fn)`)
-- Module-level singleton registry → package-level mutex-guarded map
-- `@idempotent` ctx-arg pattern → `handlerledger.Context` parameter
-- Pydantic models → struct tags + custom UnmarshalJSON for `Decimal`
-- `setup_quota(app)` → `quota.Setup(ctx, cfg)` returning a `QuotaContext`
-- Async / await → `context.Context` propagation
-- pip → Go modules at `github.com/ab0t-com/ab0t-quota-go`
-
-The JSON config from a Python deployment loads unchanged into the Go
-client; same with the LedgerStore schemas (Redis keys + DynamoDB items
-share the same shape on the wire).
+Same JSON config, same counter keyspace (a mixed Python/Go fleet shares
+counters), same auth-event wire contract, same dedup policies and sign-up
+idempotency keys. Differences are listed in
+[`MIGRATION_FROM_PYTHON.md`](MIGRATION_FROM_PYTHON.md) and the CHANGELOG.
 
 ## Contributing — local setup
 
@@ -282,11 +340,11 @@ prints a warning and lets the commit through — CI still gates.
 
 ## Status
 
-Pre-1.0. API may evolve. Pin to a SHA in production until v1.0 ships.
-Test coverage targets ≥ 80% on each package. CI runs against Go 1.22+.
+Pre-1.0. Pin a tag. Every change is in the [CHANGELOG](CHANGELOG.md).
 
 ## Where to learn more
 
-- [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) — full file tree, every function signature, intent per file
-- [`back_references.md`](back_references.md) — Python lib, mesh services, endpoints, OpenAPI specs the engineer should keep open while building
+- [`CONSUMING.md`](CONSUMING.md) — prerequisites, versions, the CLI
+- [`docs/INTEGRATION_RUNBOOK.md`](docs/INTEGRATION_RUNBOOK.md) — paid mode end to end
+- [`PRODUCT_SPEC.md`](PRODUCT_SPEC.md) — design and wire contracts
 - Python source: `https://github.com/ab0t-com/ab0t-quota` — the contracts this port mirrors

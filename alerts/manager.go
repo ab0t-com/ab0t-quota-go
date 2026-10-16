@@ -91,7 +91,9 @@ func (m *Manager) Notify(ctx context.Context, r engine.Result) {
 	default:
 		return
 	}
-	key := string(level) + ":" + r.Resource + ":" + r.TierID
+	// v0.1.10 (ticket 20261016, C-11): per TENANT — one org crossing its threshold
+	// must not mute the same alert for every other org on the tier.
+	key := string(level) + ":" + r.Resource + ":" + r.TierID + ":" + r.OrgID
 	m.mu.Lock()
 	last, seen := m.lastSent[key]
 	cool := time.Duration(m.Cfg.CooldownSeconds) * time.Second
@@ -136,6 +138,7 @@ func (m *Manager) NotifyQuotaEvent(ctx context.Context, ev engine.QuotaEvent) {
 		Used:     ev.Level,
 		Reason:   string(ev.Kind),
 		Message:  string(ev.Kind) + " scope=" + ev.Scope,
+		OrgID:    ev.OrgID,
 	})
 }
 

@@ -121,11 +121,13 @@ func bearerToken(r *http.Request) string {
 	if h == "" {
 		return ""
 	}
+	// v0.1.10 (ticket 20261016, A-24): the auth scheme is case-insensitive
+	// (RFC 9110 §11.1) — "bearer x" is a bearer token too.
 	const prefix = "Bearer "
-	if len(h) <= len(prefix) || h[:len(prefix)] != prefix {
+	if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
 		return ""
 	}
-	return h[len(prefix):]
+	return strings.TrimSpace(h[len(prefix):])
 }
 
 // ErrSkip — returned from Identity to indicate "no quota check, but

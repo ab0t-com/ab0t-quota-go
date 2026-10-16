@@ -17,6 +17,10 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
 // path becomes /api/quotas/_webhooks/auth
 ```
 
+**v0.1.9:** this mount answered `404` to every event — use
+`mux.Handle("/api/quotas/", http.StripPrefix("/api/quotas", q.WebhookHandler()))`
+there. v0.1.10 answers both forms.
+
 The receiver does HMAC verification (over the **raw body** — never
 re-canonicalize JSON), envelope parsing (v1 + v2 aliases), and
 dispatches to registered handlers.
@@ -76,28 +80,29 @@ For the common case (give new users their tier's credit grant), use the
 built-in:
 
 ```go
-import "github.com/ab0t-com/ab0t-quota-go/authevents"
-
-type myGranter struct{ billing *billing.Client }
-
-func (g myGranter) GrantCredit(ctx context.Context, in authevents.CreditGrantRequest) error {
-    _, err := g.billing.GrantCredit(ctx, billing.CreditGrantRequest{
-        UserID: in.UserID, OrgID: in.OrgID, TierID: in.TierID,
-        Amount: in.Amount, EventID: in.EventID,
-    })
-    return err
-}
-
+paidOff := false // sign-up credit alone needs no outbox
 q, _ := quota.Setup(ctx, quota.Options{
-    CreditGranter: myGranter{billing: yourBillingClient},
+    CreditGranter: quota.BillingCreditGranter(nil), // v0.1.10: billing's real credit routes
+    EnablePaid:    &paidOff,
 })
 ```
+
+`BillingCreditGranter(nil)` uses the billing client Setup builds from
+`AB0T_QUOTA_BILLING_URL` / `AB0T_QUOTA_BILLING_TOKEN` and sends billing the
+grant's `IdempotencyKey` (`user:{user}:initial_credit:{tier}` by default).
+**v0.1.9:** the typed `billing.Client.GrantCredit` posted to a route billing
+does not serve — write a granter that POSTs `/billing/{org}/promotional-credit`
+with `{amount, reason, idempotency_key}` yourself.
+
+Only a tier whose `credit_grant.trigger` is `"signup"` is granted here
+(v0.1.10; v0.1.9 granted any trigger).
 
 Setup registers the default handler on `org.created` AND
 `user.org_assigned`. It resolves the user's tier (via your
 TierProvider), composes the business dedup key (per the tier's `dedup`
-policy), and calls your `GrantCredit` exactly once per (user, tier)
-pair.
+policy), and calls the granter once per (user, tier) pair — and billing
+dedups the idempotency key durably, so even a redelivery after the library
+forgot it never grants twice.
 
 ## Auto-subscribe on startup
 

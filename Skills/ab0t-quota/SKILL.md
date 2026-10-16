@@ -16,7 +16,7 @@ config, one HTTP guard, one webhook receiver — done.
 `counters`, `providers`, `registry`, `messages`, `alerts`, `billing`,
 `payment`, `mesh`.
 
-**CLI binary**: `quotactl` — `go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@latest`.
+**CLI binary**: `quotactl` — `go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10` (pin a tag).
 
 **Skill tree** (7 specialized + this one): mechanics, concepts, design,
 runbook.
@@ -176,8 +176,8 @@ integration but the JSON is the same on both runtimes.
 
 ## Versioning + distribution
 
-- Pure-source library: `go get github.com/ab0t-com/ab0t-quota-go@v0.1.0`
-- CLI binary: `go install .../cmd/quotactl@v0.1.0` OR download from GitHub releases
+- Pure-source library: `go get github.com/ab0t-com/ab0t-quota-go@v0.1.10`
+- CLI binary: `go install .../cmd/quotactl@v0.1.10` OR download from GitHub releases
 - The git tag IS the release — there's no separate publish step
 - Semver respected; breaking changes go in new majors
 

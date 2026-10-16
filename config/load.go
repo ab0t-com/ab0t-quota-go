@@ -20,6 +20,15 @@ var SearchPaths = []string{
 // LoadConfig reads, interpolates, parses, and validates the config.
 // If path is empty, $QUOTA_CONFIG_PATH and SearchPaths are tried.
 func LoadConfig(path string) (*Config, error) {
+	// v0.1.10 (ticket 20261016): the library's own examples and one skill named
+	// AB0T_QUOTA_CONFIG_PATH, which nothing reads — a service that set it loaded
+	// whatever the search paths found instead, silently. The name stays
+	// QUOTA_CONFIG_PATH (Python parity); a set-but-ignored AB0T_ name is now loud.
+	if v := os.Getenv("AB0T_QUOTA_CONFIG_PATH"); v != "" && os.Getenv("QUOTA_CONFIG_PATH") != v {
+		slog.Warn("AB0T_QUOTA_CONFIG_PATH is set but IGNORED — the config path variable is QUOTA_CONFIG_PATH "+
+			"(rename it); loading from the explicit path / QUOTA_CONFIG_PATH / search paths instead",
+			"ignored_value", v)
+	}
 	if path == "" {
 		path = os.Getenv("QUOTA_CONFIG_PATH")
 	}

@@ -13,15 +13,15 @@ import (
 )
 
 type stCli1 struct {
-	ID           string            `json:"id"`
-	PythonVerbs  []string          `json:"python_verbs"`
-	GoVerbs      []string          `json:"go_verbs"`
-	ExitTaxonomy map[string]string `json:"exit_taxonomy"`
-	ReportSchema string            `json:"report_schema"`
-	PostureSchem string            `json:"posture_schema"`
-	EmitKinds    []string          `json:"emit_kinds"`
+	ID           string              `json:"id"`
+	PythonVerbs  []string            `json:"python_verbs"`
+	GoVerbs      []string            `json:"go_verbs"`
+	ExitTaxonomy map[string]string   `json:"exit_taxonomy"`
+	ReportSchema string              `json:"report_schema"`
+	PostureSchem string              `json:"posture_schema"`
+	EmitKinds    []string            `json:"emit_kinds"`
 	EmitMust     map[string][]string `json:"emit_must_contain"`
-	SideEffects  map[string]string `json:"side_effects"`
+	SideEffects  map[string]string   `json:"side_effects"`
 }
 
 func loadStCli1(t *testing.T) stCli1 {

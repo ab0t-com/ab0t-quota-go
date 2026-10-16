@@ -166,6 +166,12 @@ func (e *Engine) dualOps() (counters.DualOps, error) {
 // Check runs the quota decision for a single resource. Returns a Result
 // the middleware can serialize.
 func (e *Engine) Check(ctx context.Context, in CheckInput) (Result, error) {
+	r, err := e.check(ctx, in)
+	r.OrgID = in.OrgID
+	return r, err
+}
+
+func (e *Engine) check(ctx context.Context, in CheckInput) (Result, error) {
 	if in.ResourceKey == "" {
 		return Result{}, errors.New("engine: ResourceKey required")
 	}

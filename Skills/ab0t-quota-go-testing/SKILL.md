@@ -353,8 +353,11 @@ AND the auth-side subscription. Generate fresh:
 
 ```bash
 openssl rand -hex 32 > /tmp/new-secret
-# put it in your service env AND re-register the subscription:
-quotactl subscribe-events  # idempotent; updates if endpoint matches
+# auth cannot edit a subscription's secret: deploy the NEW secret in
+# AB0T_AUTH_WEBHOOK_SECRET with the old one in AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS,
+# then replace the subscription (v0.1.10+; deletes + re-creates it):
+quotactl subscribe-events --rotate-secret
+# v0.1.9: delete the subscription in auth, then run subscribe-events again
 ```
 
 ### "Webhooks return 200 + `status: ignored`"

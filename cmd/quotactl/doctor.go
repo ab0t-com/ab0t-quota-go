@@ -13,8 +13,9 @@
 // its own side effects (ST-CLI-1).
 //
 // Exit taxonomy (shared with the Python CLI, pinned by ST-CLI-1):
-//   0 ok · 1 gate refusal · 2 config error · 3 unreachable/credentials ·
-//   4 internal.
+//
+//	0 ok · 1 gate refusal · 2 config error · 3 unreachable/credentials ·
+//	4 internal.
 package main
 
 import (
