@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 
 	"github.com/ab0t-com/ab0t-quota-go/internal/httpx"
@@ -45,8 +44,12 @@ func (c *Client) CheckQuota(ctx context.Context, in QuotaCheckRequest) (*QuotaCh
 
 // GetUsageSummary calls GET /billing/usage/{org_id}/summary.
 func (c *Client) GetUsageSummary(ctx context.Context, orgID string) (*UsageSummary, error) {
+	org, err := seg("GetUsageSummary", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out UsageSummary
-	if err := c.http.GET(ctx, "/billing/usage/"+seg(orgID)+"/summary", &out); err != nil {
+	if err := c.http.GET(ctx, "/billing/usage/"+org+"/summary", &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -101,8 +104,12 @@ func (c *Client) GrantPromotionalCredit(ctx context.Context, orgID string, in Pr
 	if err := checkGrant("GrantPromotionalCredit", orgID, in.Amount, in.IdempotencyKey); err != nil {
 		return nil, err
 	}
+	org, err := seg("GrantPromotionalCredit", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out UpdateBalanceResponse
-	if err := c.http.POST(ctx, "/billing/"+seg(orgID)+"/promotional-credit", in, &out); err != nil {
+	if err := c.http.POST(ctx, "/billing/"+org+"/promotional-credit", in, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -122,8 +129,12 @@ func (c *Client) ApplyCreditGrant(ctx context.Context, orgID string, in ApplyCre
 		return nil, errors.New("billing: ApplyCreditGrant: RolloverMax is required for lifecycle " +
 			"rollover_capped and must be absent otherwise")
 	}
+	org, err := seg("ApplyCreditGrant", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out UpdateBalanceResponse
-	if err := c.http.POST(ctx, "/billing/"+seg(orgID)+"/apply-credit-grant", in, &out); err != nil {
+	if err := c.http.POST(ctx, "/billing/"+org+"/apply-credit-grant", in, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -141,8 +152,16 @@ func checkGrant(op, orgID string, amount decimal.Decimal, key string) error {
 	return nil
 }
 
-// seg escapes one path segment, so an id can never address another route.
-func seg(s string) string { return url.PathEscape(s) }
+// seg escapes one path segment, so an id can never address another route. A
+// blank, "." or ".." id is refused (v0.1.11): url.PathEscape leaves dot segments
+// intact, and a normalising proxy resolves "/billing/../x" to "/x".
+func seg(op, what, s string) (string, error) {
+	v, err := httpx.PathSegment(what, s)
+	if err != nil {
+		return "", fmt.Errorf("billing: %s: %w", op, err)
+	}
+	return v, nil
+}
 
 // GetSubscription calls GET /subscriptions/{org_id}.
 //
@@ -151,8 +170,12 @@ func seg(s string) string { return url.PathEscape(s) }
 // GET /subscriptions/{org_id} returns a LIST ({subscriptions,total,has_more}),
 // not one Subscription. Call payment directly until a typed method ships.
 func (c *Client) GetSubscription(ctx context.Context, orgID string) (*Subscription, error) {
+	org, err := seg("GetSubscription", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out Subscription
-	if err := c.http.GET(ctx, "/subscriptions/"+seg(orgID), &out); err != nil {
+	if err := c.http.GET(ctx, "/subscriptions/"+org, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -164,7 +187,15 @@ func (c *Client) GetSubscription(ctx context.Context, orgID string) (*Subscripti
 // WARNING (ticket 20261016, B-07): that route is on the PAYMENT service; on the
 // billing host this answers 404.
 func (c *Client) CancelSubscription(ctx context.Context, orgID, subID string) error {
-	return c.http.DELETE(ctx, "/subscriptions/"+seg(orgID)+"/"+seg(subID), nil)
+	org, err := seg("CancelSubscription", "org id", orgID)
+	if err != nil {
+		return err
+	}
+	sub, err := seg("CancelSubscription", "subscription id", subID)
+	if err != nil {
+		return err
+	}
+	return c.http.DELETE(ctx, "/subscriptions/"+org+"/"+sub, nil)
 }
 
 // Heartbeat calls POST /billing/heartbeat. NOTE: billing serves no such route —
@@ -189,7 +220,12 @@ func (c *Client) Heartbeat(ctx context.Context, in HeartbeatRequest) error {
 // row. (Not defaulted by the library: some callers rely on omission to ask billing
 // to price the row — ticket 20261016, B-09, an owner decision.)
 func (c *Client) RecordUsage(ctx context.Context, in RecordUsageRequest) error {
-	if err := c.http.POST(ctx, "/billing/usage/"+seg(in.OrgID)+"/", in, nil); err != nil {
+	org, err := seg("RecordUsage", "org id", in.OrgID)
+	if err != nil {
+		slog.Warn("billing record usage refused", "err", err)
+		return nil
+	}
+	if err := c.http.POST(ctx, "/billing/usage/"+org+"/", in, nil); err != nil {
 		slog.Warn("billing record usage failed", "err", err, "org", in.OrgID)
 		return nil
 	}
@@ -219,8 +255,12 @@ func (c *Client) RecordUsage(ctx context.Context, in RecordUsageRequest) error {
 //	5xx - transient; the settlement did not land, or landed and the response was
 //	      lost. Retry — the durable key makes that safe in both readings.
 func (c *Client) SettleActivation(ctx context.Context, orgID string, in SettleActivationRequest) (*SettleActivationResponse, error) {
+	org, err := seg("SettleActivation", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out SettleActivationResponse
-	if err := c.http.POST(ctx, "/billing/"+seg(orgID)+"/settle", in, &out); err != nil {
+	if err := c.http.POST(ctx, "/billing/"+org+"/settle", in, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

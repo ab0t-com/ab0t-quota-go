@@ -1,0 +1,5 @@
+groups:
+  - name: quota
+    rules:
+      - alert: QuotaWebhookUnsigned
+        expr: 'count_over_time({app="svc"} |= "reject all events" [5m]) > 0'

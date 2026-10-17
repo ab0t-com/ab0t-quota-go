@@ -1,0 +1,11 @@
+{
+  "tiers": [
+    { "tier_id": "free", "credit_grant": { "trigger": "signup", "amount_per_period": "5.00" } },
+    { "tier_id": "whale",
+      "credit_grant": {
+        "trigger": "signup",
+        "_comment": "quotago:v0.1.11-reviewed — the exact value is the intended one",
+        "amount_per_period": 9007199254740993
+      } }
+  ]
+}

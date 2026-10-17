@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -33,23 +35,77 @@ const MaxResponseBytes = 10 << 20
 // v0.1.10: redirects to a DIFFERENT host are refused. The mesh key travels in
 // X-API-Key, which net/http (unlike Authorization) forwards across hosts — a
 // redirect would hand the service's key to whatever host it points at.
+//
+// v0.1.11: redirects are followed only on the same host, keeping the same ORIGIN —
+// scheme, host and port (default port filled in) — or upgrading http → https;
+// never a downgrade. v0.1.10 compared the host alone, so an https base URL
+// answering a redirect to http:// on the same host sent the key over plaintext.
 func New(baseURL, token string) *Client {
 	return &Client{
-		http:    &http.Client{Timeout: 15 * time.Second, CheckRedirect: sameHostRedirectsOnly},
+		http:    &http.Client{Timeout: 15 * time.Second, CheckRedirect: sameOriginRedirectsOnly},
 		BaseURL: baseURL,
 		Token:   token,
 	}
 }
 
-func sameHostRedirectsOnly(req *http.Request, via []*http.Request) error {
+// origin is the comparison key scheme://host:port — lowercased, default port
+// filled in. ok is false for anything that is not an absolute http(s) URL.
+func origin(u *url.URL) (key string, ok bool) {
+	if u == nil || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	switch {
+	case scheme == "https" && port == "":
+		port = "443"
+	case scheme == "http" && port == "":
+		port = "80"
+	case scheme != "http" && scheme != "https":
+		return "", false
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), true
+}
+
+// sameOriginRedirectsOnly: every hop must stay on the FIRST request's host, and each hop either keeps the previous
+// hop's origin or is an http → https UPGRADE on that host. An upgrade is allowed because refusing it protects nothing
+// (the key already went out in plaintext on the first, http request) and would break a client configured with an
+// http:// base URL that its server upgrades. A downgrade (https → http) is refused at every hop — that is Q-1.
+func sameOriginRedirectsOnly(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("httpx: stopped after 10 redirects")
 	}
-	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
-		return fmt.Errorf("httpx: refusing redirect from %s to another host (%s): it would carry the API key",
-			via[0].URL.Host, req.URL.Host)
+	if len(via) == 0 {
+		return nil
+	}
+	from, _ := origin(via[0].URL)
+	prev, _ := origin(via[len(via)-1].URL)
+	to, ok := origin(req.URL)
+	sameHost := ok && strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname())
+	upgrade := sameHost && strings.EqualFold(via[len(via)-1].URL.Scheme, "http") && strings.EqualFold(req.URL.Scheme, "https")
+	if !ok || !sameHost || (to != prev && !upgrade) {
+		return fmt.Errorf("httpx: refusing redirect from %s to another origin (%s): it would carry the API key "+
+			"(a redirect is followed only to the same scheme, host and port — set the base URL to the final address)",
+			from, req.URL.Scheme+"://"+req.URL.Host)
 	}
 	return nil
+}
+
+// ErrBadPathSegment is returned (wrapped) when an id cannot be one URL path
+// segment: it is blank, "." or "..".
+var ErrBadPathSegment = errors.New("must not be blank, \".\" or \"..\" (it would address another route)")
+
+// PathSegment escapes s as ONE URL path segment, so an id can never address
+// another route. url.PathEscape alone leaves "." and ".." intact, and every
+// normalising proxy resolves "/billing/../x" to "/x" (RFC 3986 §5.2.4); "%2E%2E"
+// is no better (§6.2.2.2 lets a normaliser decode it first). So a blank, "." or
+// ".." id is refused (v0.1.11), like the clients' existing blank-org-id check.
+// what names the id in the error ("org id", "session id", ...).
+func PathSegment(what, s string) (string, error) {
+	if t := strings.TrimSpace(s); t == "" || t == "." || t == ".." {
+		return "", fmt.Errorf("%s %q %w", what, s, ErrBadPathSegment)
+	}
+	return url.PathEscape(s), nil
 }
 
 // SetTimeout adjusts the http.Client timeout.

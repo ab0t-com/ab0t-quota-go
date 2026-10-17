@@ -1,0 +1,6 @@
+groups:
+  - name: quota
+    rules:
+      - alert: QuotaWebhookUnsigned
+        # quotago:v0.1.11-reviewed — fires only when neither secret is set; that text is unchanged
+        expr: 'count_over_time({app="svc"} |= "reject all events" [5m]) > 0'

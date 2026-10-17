@@ -3,6 +3,44 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.1.11] — 2026-10-16
+
+Bug fixes from an adversarial test pass over v0.1.10. **No exported symbol was removed,
+changed or added.** One fix changes behaviour you could notice — marked ⚠ and listed with
+what to check in [`migrations/v0.1.10-to-v0.1.11/`](migrations/v0.1.10-to-v0.1.11/MIGRATION.md)
+(read-only checker included).
+
+- ⚠ **Security (medium): the mesh API key followed an https → http redirect in cleartext.**
+  The billing/payment client's redirect guard (v0.1.10) compared the host only, so an
+  `https://` base URL answering a redirect to `http://` on the same host was followed and
+  `X-API-Key` went out on a plaintext connection. Every hop must now stay on the same **host**,
+  and keep the previous hop's **origin** (scheme, host and port, default port filled in) or be an
+  **http → https upgrade** on that host. **An https → http redirect that used to be followed is
+  now refused** (at any hop, including after an upgrade). An http → https upgrade is still
+  followed: refusing it would protect nothing (the key already went out on the first, http request)
+  and would break an `http://` base URL — but use the `https://` address directly. The error reads
+  `refusing redirect … to another origin`; on the settlement path it is retried, never voided.
+  (`https://h` → `https://h:443` is now followed; v0.1.10 refused it.)
+- **Fixed: the capability report said "receiver will reject all events with 401" while the
+  previous secret still verified.** With `AB0T_AUTH_WEBHOOK_SECRET` unset and
+  `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` set, `WhyOff["auth_events_signed"]` now says the receiver
+  accepts only events signed with the previous secret(s), and boot logs a WARN. Receiver
+  behaviour is unchanged.
+- **Fixed: a `.` or `..` org id escaped its path segment.** `url.PathEscape` leaves dot segments
+  intact, so org `..` became `/billing/../promotional-credit`, which a normalising proxy resolves
+  to another route. Every billing/payment method that puts an id in the URL now refuses a blank,
+  `.` or `..` org / subscription / session id before sending (`RecordUsage` stays best-effort:
+  logged, returns `nil`).
+- **Fixed: `config.Decimal` read a JSON number through float64.** A money value written as a
+  number in `quota-config.json` (`amount_per_period`, `initial_credit`) lost digits beyond float64
+  (`9007199254740993` → `…992`). It is now read exactly; the string, number and `null` forms all
+  still work. A value with up to 15 significant digits reads the same as before.
+- Tests: the outbox settlement test double still used the pre-v0.1.10 classification (401/403/any
+  404 voided; unlisted statuses counted as a success). It now mirrors production, and one shared
+  status table (`outbox/testdata/settle_classification_20261016.json`, every defined 4xx/5xx) is
+  driven through both the double and the real billing client + settler. The four known-bug tests
+  run unconditionally (`QUOTA_RUN_KNOWN_BUGS` is gone).
+
 ## [0.1.10] — 2026-10-16
 
 Bug fixes from a vendor-style review (sign-up credit, settlement money paths,

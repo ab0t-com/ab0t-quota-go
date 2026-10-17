@@ -679,7 +679,16 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		PreviousSecrets: previous,
 		LedgerStore:     q.LedgerStore,
 	})
-	if secret == "" {
+	// v0.1.11 (ticket 20261016 test hardening, Q-2): the report must say what the
+	// receiver does. With only the previous secret(s) set it still ACCEPTS events
+	// signed with them — "reject all" was false.
+	switch {
+	case secret == "" && len(previous) > 0:
+		cap.WhyOff["auth_events_signed"] = "AB0T_AUTH_WEBHOOK_SECRET not set — receiver accepts only events signed " +
+			"with the previous secret(s) in " + EnvWebhookSecretPrevious + " and rejects the rest with 401; set the current secret"
+		slog.Warn("auth-event receiver: " + EnvWebhookSecretPrevious + " is set but AB0T_AUTH_WEBHOOK_SECRET is not — " +
+			"only events signed with the previous secret(s) are accepted")
+	case secret == "":
 		cap.WhyOff["auth_events_signed"] = "AB0T_AUTH_WEBHOOK_SECRET not set — receiver will reject all events with 401"
 	}
 

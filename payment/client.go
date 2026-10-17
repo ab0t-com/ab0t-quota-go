@@ -3,7 +3,7 @@ package payment
 import (
 	"context"
 	"errors"
-	"net/url"
+	"fmt"
 
 	"github.com/ab0t-com/ab0t-quota-go/internal/httpx"
 	"github.com/ab0t-com/ab0t-quota-go/mesh"
@@ -40,8 +40,12 @@ func (c *Client) CreateCheckoutSession(ctx context.Context, in CheckoutSessionRe
 // VerifyCheckoutSession calls GET /checkout/sessions/{session_id}/verify.
 // Per back_references C5 — GET, not POST.
 func (c *Client) VerifyCheckoutSession(ctx context.Context, sessionID string) (*CheckoutSession, error) {
+	sid, err := seg("VerifyCheckoutSession", "session id", sessionID)
+	if err != nil {
+		return nil, err
+	}
 	var out CheckoutSession
-	if err := c.http.GET(ctx, "/checkout/sessions/"+url.PathEscape(sessionID)+"/verify", &out); err != nil {
+	if err := c.http.GET(ctx, "/checkout/sessions/"+sid+"/verify", &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -52,8 +56,12 @@ func (c *Client) VerifyCheckoutSession(ctx context.Context, sessionID string) (*
 // v0.1.10 bug fix: v0.1.9 posted to /customer/portal, which payment never served.
 // The caller needs payment.read for the org.
 func (c *Client) CreatePortalSession(ctx context.Context, orgID, returnURL string) (*PortalSession, error) {
+	org, err := seg("CreatePortalSession", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
 	var out PortalSession
-	if err := c.http.POST(ctx, "/portal/"+url.PathEscape(orgID)+"/session", map[string]string{
+	if err := c.http.POST(ctx, "/portal/"+org+"/session", map[string]string{
 		"return_url": returnURL,
 	}, &out); err != nil {
 		return nil, err
@@ -70,11 +78,26 @@ func (c *Client) ListPaymentMethods(ctx context.Context, orgID string) ([]Paymen
 		PaymentMethods []PaymentMethod `json:"payment_methods"`
 		Items          []PaymentMethod `json:"items"` // tolerated legacy shape
 	}
-	if err := c.http.GET(ctx, "/payment-methods/"+url.PathEscape(orgID), &out); err != nil {
+	org, err := seg("ListPaymentMethods", "org id", orgID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.http.GET(ctx, "/payment-methods/"+org, &out); err != nil {
 		return nil, err
 	}
 	if out.PaymentMethods != nil {
 		return out.PaymentMethods, nil
 	}
 	return out.Items, nil
+}
+
+// seg escapes one path segment, so an id can never address another route. A
+// blank, "." or ".." id is refused (v0.1.11): url.PathEscape leaves dot segments
+// intact, and a normalising proxy resolves "/portal/../x" to "/x".
+func seg(op, what, s string) (string, error) {
+	v, err := httpx.PathSegment(what, s)
+	if err != nil {
+		return "", fmt.Errorf("payment: %s: %w", op, err)
+	}
+	return v, nil
 }

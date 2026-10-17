@@ -8,7 +8,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/shopspring/decimal"
 )
@@ -38,7 +37,7 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON accepts:
 //   - JSON string: "10.00", "10", "0.5"
-//   - JSON number: 10, 10.5, 0.5
+//   - JSON number: 10, 10.5, 0.5, 1e-3 — exact, never through float64 (v0.1.11)
 //   - null: leaves the Decimal as zero
 func (d *Decimal) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 || string(b) == "null" {
@@ -58,12 +57,19 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 		d.Decimal = v
 		return nil
 	}
-	// Number form
-	f, err := strconv.ParseFloat(string(b), 64)
+	// Number form. v0.1.11 (ticket 20261016 test hardening, Q-4): parsed EXACTLY
+	// from the literal, like the string form. v0.1.10 went through float64, so
+	// 9007199254740993 read as 9007199254740992 and 0.123456789012345678901 as
+	// 0.12345678901234568 — binary-float error in a money value.
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("config.Decimal: %w", err)
+	}
+	v, err := decimal.NewFromString(n.String())
 	if err != nil {
 		return fmt.Errorf("config.Decimal: %w", err)
 	}
-	d.Decimal = decimal.NewFromFloat(f)
+	d.Decimal = v
 	return nil
 }
 

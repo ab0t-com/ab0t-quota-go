@@ -39,8 +39,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,8 +251,13 @@ func splitPath(p string) []string {
 
 // --- The Settler under test: the SAME mapping quota/settler.go performs -------------------
 //
-// (quota/ cannot be imported from outbox_test without a cycle, so the classification is
-// re-expressed here. quota/settler_test.go asserts the real one agrees with this table.)
+// (quota's classifier is unexported, so it is re-expressed here.) v0.1.11 (ticket
+// .private/tickets/20261016_test_hardening_findings, T-Q1): this double used to void
+// 401/403/every 404 — the pre-v0.1.10 mapping — and reported statuses it did not list as
+// a success. It now mirrors classifySettleError exactly, and the cross-check is real: one
+// table, testdata/settle_classification_20261016.json, is driven through THIS double
+// (settle_classification_crosscheck_20261016_test.go) and through the production client
+// (quota/settle_classification_crosscheck_20261016_test.go); both must equal it.
 
 type httpSettler struct {
 	baseURL string
@@ -284,14 +291,25 @@ func (s httpSettler) SettleActivation(ctx context.Context, in outbox.SettleReque
 		return "", false, outbox.ErrSettleTransient
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false, outbox.ErrSettleTransient
+	}
 
+	// Production (quota/settler.go classifySettleError): 409 → refused; 404 is permanent
+	// ONLY with billing's "Billing account not found" (a route/proxy 404 retries); 400 and
+	// 422 are permanent; every other status ≥ 400 — 401/403 included — is transient.
 	switch {
 	case resp.StatusCode == 409:
 		return "", false, outbox.ErrSettleRefused409
-	case resp.StatusCode == 400, resp.StatusCode == 401, resp.StatusCode == 403,
-		resp.StatusCode == 404, resp.StatusCode == 422:
+	case resp.StatusCode == 404:
+		if strings.Contains(string(raw), "Billing account not found") {
+			return "", false, outbox.ErrSettlePermanent
+		}
+		return "", false, outbox.ErrSettleTransient
+	case resp.StatusCode == 400, resp.StatusCode == 422:
 		return "", false, outbox.ErrSettlePermanent
-	case resp.StatusCode >= 500 || resp.StatusCode == 408 || resp.StatusCode == 429:
+	case resp.StatusCode >= 400:
 		return "", false, outbox.ErrSettleTransient
 	}
 
@@ -299,7 +317,10 @@ func (s httpSettler) SettleActivation(ctx context.Context, in outbox.SettleReque
 		ActualCost string `json:"actual_cost"`
 		Replayed   bool   `json:"replayed"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if len(raw) == 0 { // as httpx: an empty success body decodes to nothing
+		return "", false, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", false, outbox.ErrSettleTransient
 	}
 	// The cost is BILLING'S answer, read back. We did not compute it.
