@@ -44,5 +44,13 @@ type Result struct {
 // Deny stops.
 func (r Result) Allowed() bool { return r.Decision != Deny }
 
+// AllowedFailClosed (v0.1.12, additive, opt-in) is Allowed() with one difference: an
+// UnknownTier decision does NOT proceed. That is the Python runtime's reading (an unresolved tier is
+// a denial there), so a consumer guarding something that costs money can swap `res.Allowed()` for
+// `res.AllowedFailClosed()` and an auth/billing outage can no longer admit unlimited work. Allowed()
+// and the middleware keep today's behaviour; a future change to their default will be announced in
+// the CHANGELOG with a migration note.
+func (r Result) AllowedFailClosed() bool { return r.Decision != Deny && r.Decision != UnknownTier }
+
 // IsUnlimited reports whether the result was for an unlimited resource.
 func (r Result) IsUnlimited() bool { return r.Limit == nil }

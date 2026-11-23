@@ -20,6 +20,9 @@ Your Go service uses it to:
 3. **Settle metered usage with billing** (paid mode) — through a durable
    outbox, so a crash or a billing outage never loses or double-charges a
    usage event. Paid mode refuses to start without the whole chain.
+4. **Meter a running resource** (optional, v0.1.12) — `meter` reserves funds, sends priced
+   heartbeats and the stop event through the outbox, and refunds a launch that never started;
+   `billing.Client.ReserveFunds` / `GetBalance` for direct use; `meter/metertest.Fake` for tests.
 
 Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 `q.Healthy()` fails when a money-relevant part is missing.
@@ -27,8 +30,8 @@ Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 ## Install (pin a version)
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10   # the CLI
+go get github.com/ab0t-com/ab0t-quota-go@v0.1.12
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.12   # the CLI
 ```
 
 Pre-1.0: read the [CHANGELOG](CHANGELOG.md) (and `migrations/` when present)

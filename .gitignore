@@ -50,6 +50,8 @@ go.work.sum
 # internal services, tickets, or deploy ordering. Public release SOP is the
 # tracked RELEASE.md; anything internal lives here and stays local.
 .private/
+# Internal work tickets — local only, never in the public repo.
+/tickets/
 
 # ---------- Archived scratch / diagnostics (local only) ----------------
 .archive/

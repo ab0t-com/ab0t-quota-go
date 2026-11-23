@@ -157,6 +157,11 @@ func (e *Emitter) Drain(ctx context.Context, maxPerPass int) (int, error) {
 	return delivered, nil
 }
 
+// HasPublisher reports whether a transport (SNS in prod) is wired (v0.1.12, additive). Without
+// one, EmitViaOutbox can only settle terminal events and voids every other event — so a heartbeat
+// never reaches billing. meter.New refuses such an emitter unless told otherwise.
+func (e *Emitter) HasPublisher() bool { return e != nil && e.pub != nil }
+
 // PendingCount is the number of undelivered intents in the durable store.
 func (e *Emitter) PendingCount(ctx context.Context) (int, error) {
 	p, err := e.store.ListPending(ctx, 10000)

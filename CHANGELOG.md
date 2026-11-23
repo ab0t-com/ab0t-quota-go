@@ -3,6 +3,64 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.1.12] — 2026-11-23
+
+Metered resources made easy: one helper that reserves funds, sends priced heartbeats and the stop
+event, and refunds a launch that never started — plus the billing client calls it is built on, typed
+billing funds events and an in-process fake for your tests. **Additive only: no exported symbol was
+removed or changed, no default changed, nothing is wired into `quota.Setup` automatically. You do not
+need to do anything to upgrade; every item below is opt-in.** Same contract as the Python `ab0t-quota`
+`ResourceMeter`.
+
+- **New package `meter` — run a metered resource against billing with one helper.** *(Opt-in; nothing
+  to do unless you want it.)*
+  `meter.New(meter.Config{Billing: q.Billing, Sink: meter.OutboxSink{Emitter: q.Outbox}, ...})`, then
+  `Reserve` → `run.Started` → priced heartbeats → `run.Stop` (or `run.Abort` for a launch that never
+  started); or `m.Session(ctx, in, fn)`; or `defer run.Close(ctx, "closed")`. What it does for you:
+  - every heartbeat carries `hourly_rate`, `allocation_fee` and `started_at`, so billing keeps the hold
+    funded to the running cost and can send `billing.funds_low` / `billing.funds_exhausted`;
+  - heartbeats are scheduled (default every 300 s);
+  - a reserve sends a fresh billing `request_id` per launch and retries once, with the same id, on a
+    502/503/504 or a transport failure — a retry never creates a second hold;
+  - refusals are typed: `*InsufficientFundsError` (402, with `APIError()` giving the familiar
+    `budget_exceeded` body) and `*ReservationLimitedError` (429); any other billing failure is an error,
+    so you never launch unreserved;
+  - prices can be declared once in `quota-config.json` `pricing.products` (`meter.ParsePricing(cfg.Pricing)`,
+    then `Product` / `Variant`); incomplete pricing or an ambiguous default variant is an `ErrConfig`,
+    never a guess;
+  - `run.State()` + `Resume` / `Meter.Heartbeat(state)` survive a process restart or run from a sweeper;
+  - funds events reach your `OnFundsLow` / `OnFundsExhausted(ctx, ev, run)` hooks through
+    `HandleBillingEvent`; with no hook they are logged loudly and recorded on `run.FundsState()` — the
+    library never stops anything itself.
+  `New` refuses a missing biller or sink, and a sink with no transport (no `outbox.sns_topic_arn`), since
+  no heartbeat would reach billing; set `AllowMissingTransport` to accept that knowingly. Lifecycle events
+  go through the durable outbox under the key `reservation_id:event_type` (the Python key). The meter
+  prices nothing — billing prices the lifetime when the stop event arrives; HTTP `/commit` is never used.
+- **New package `meter/metertest` — `Fake`, an in-process billing for your tests.** *(Opt-in; test code
+  only.)* It is both the biller and the event sink: balances, request-id idempotency, 402/429, typed
+  refunds, every lifecycle event recorded, `UnpricedHeartbeats()` (should stay empty), and
+  `TriggerFundsLow` / `TriggerFundsExhausted` delivering billing's wire payload to your meter or handler.
+  It prices nothing. Never use it in production code.
+- **`billing` client: reserve, refund, balance, zero-cost metering.** *(Opt-in; existing methods,
+  including `RecordUsage`, are unchanged.)* `Client.ReserveFunds` → typed `ReserveResult`
+  (`ReserveReserved` / `ReserveInsufficientFunds` with billing's `available_balance` / `required_topup` /
+  `ReserveLimited` with billing's reason; anything else is an error). `Client.RefundReservationOutcome`
+  → `RefundOutcome` classified from billing's stable error `code` (never returns an error;
+  `HoldMayRemain()` is true only for `RefundFailed`). `Client.GetBalance`. `Client.RecordResourceUsage`
+  — a metering row that sends `Cost` / `PlatformFee` as `"0"` when empty so billing never prices it, and
+  refuses a row without `ToolID`. `IsTransient(err)` and `ErrInvalidRequest` (a request refused before
+  sending).
+- **`billing`: typed funds events.** *(Opt-in.)* `ParseFundsEvent` (an SQS body, SNS envelope or raw
+  JSON; anything that is not a billing funds event returns `nil, nil`, so a shared queue is safe),
+  `FundsEvent` (money as `*decimal.Decimal`, nil when billing did not say), and `FundsEventHandler`
+  (your hooks; dedups on billing's `(reservation_id, event_type, trigger)` key inside a window, releases
+  the claim when a hook fails so the redelivery gets through, logs loudly when no hook is set).
+  `MemoryDedup` / `EventDedup` — share one claim store across replicas on one queue.
+- **`engine.Result.AllowedFailClosed()`.** *(Opt-in.)* Like `Allowed()`, but an `UnknownTier` decision
+  does not proceed (the Python runtime's reading). Use it where admitting work during an auth/billing
+  outage would cost money. `Allowed()` and the middleware are unchanged.
+- **`outbox.Emitter.HasPublisher()`** — read-only: whether a transport is wired. *(Nothing to do.)*
+
 ## [0.1.11] — 2026-10-16
 
 Bug fixes from an adversarial test pass over v0.1.10. **No exported symbol was removed,
