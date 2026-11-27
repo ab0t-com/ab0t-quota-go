@@ -1,5 +1,5 @@
 {
-  "about": "Price list published to billing (0.8.0 / Go 0.3.0). Byte-identical copy in ab0t-quota/tests/ and ab0t-quota-go/testdata/. For each valid case: the canonical products JSON (keys sorted at every level, no whitespace, money as canonical strings) and its version = sha256 of those bytes. The canonical strings and hashes were written by hand and hashed with hashlib, independently of either implementation. Every invalid case must be refused (nothing published).",
+  "about": "Price list published to billing (0.7.1 / Go 0.3.0). Byte-identical copy in ab0t-quota/tests/ and ab0t-quota-go/testdata/. For each valid case: the canonical products JSON (keys sorted at every level, no whitespace, money as canonical strings) and its version = sha256 of those bytes. The canonical strings and hashes were written by hand and hashed with hashlib, independently of either implementation. Every invalid case must be refused (nothing published).",
   "schema": "ab0t.price_list.v1",
   "path": "/billing/price-list/{service_name}",
   "valid": [

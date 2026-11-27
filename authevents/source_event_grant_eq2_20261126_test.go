@@ -77,14 +77,20 @@ func TestDefaultCreditGrant_RuleChangeDoesNotRegrantTheSameEvent_EQ2(t *testing.
 	}
 }
 
-// Control: a NEW event follows the new rule.
+// Control: a NEW event follows the new rule. v0.3.1 (once per person per company, whatever the rule):
+// a new event for the SAME person gives nothing more; a new event for a new person follows the new rule.
 func TestDefaultCreditGrant_NewEventFollowsTheNewRule_EQ2(t *testing.T) {
 	gr := &stubGranter{}
 	biz := handlerledger.NewInMemoryLedgerStore()
 	eq2Handle(t, config.DedupPerUserPerTier, gr, biz, eq2Event(t, eq2Body))
 	eq2Handle(t, config.DedupPerOrgGlobal, gr, biz,
 		eq2Event(t, `{"event_type":"org.created","event_id":"evt-signup-2","data":{"user_id":"u1","org_id":"o1"}}`))
-	if gr.calls.Load() != 2 || gr.last.IdempotencyKey != BillingIdempotencyKey(string(config.DedupPerOrgGlobal), "u1", "o1", "pro") {
+	if gr.calls.Load() != 1 {
+		t.Fatalf("v0.3.1: the same person got %d gifts, want 1", gr.calls.Load())
+	}
+	eq2Handle(t, config.DedupPerOrgGlobal, gr, biz,
+		eq2Event(t, `{"event_type":"org.created","event_id":"evt-signup-3","data":{"user_id":"u2","org_id":"o1"}}`))
+	if gr.calls.Load() != 2 || gr.last.IdempotencyKey != BillingIdempotencyKey(string(config.DedupPerOrgGlobal), "u2", "o1", "pro") {
 		t.Fatalf("grants %d, last key %q", gr.calls.Load(), gr.last.IdempotencyKey)
 	}
 }

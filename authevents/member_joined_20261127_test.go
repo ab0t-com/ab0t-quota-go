@@ -145,15 +145,16 @@ func TestMemberJoined_RedeliveryAndRejoinOnAnotherTierGiveNothingMore_20261127(t
 	}
 }
 
-// CONTROL: the v0.2.0 sign-up handler (option off) keys on the tier — the same scenario grants twice,
-// which is why the member-joined path carries the once-per-person key.
+// CONTROL (until v0.3.0): the v0.2.0 sign-up handler (option off) keyed on the tier — the same scenario
+// granted twice. v0.3.1: the sign-up handler always carries the once-per-person key (opted in or not),
+// so it gives ONE gift — see signup_gift_once_per_person_20261127_test.go.
 func TestMemberJoined_WithoutTheOnceKeyARejoinOnAnotherTierGrantsAgain_20261127(t *testing.T) {
 	r := newMJRig(t, false)
 	_ = r.deliver(t, r.signup, mjEvent(t, "org.created", "evt_a", "u_maya", company, workspace))
 	*r.tier = "pro"
 	_ = r.deliver(t, r.signup, mjEvent(t, "org.created", "evt_b", "u_maya", company, workspace))
-	if r.gr.calls.Load() != 2 {
-		t.Fatalf("control: %d grants, want 2", r.gr.calls.Load())
+	if r.gr.calls.Load() != 1 {
+		t.Fatalf("v0.3.1: %d grants, want 1 (once per person per company)", r.gr.calls.Load())
 	}
 }
 
@@ -181,8 +182,9 @@ func TestMemberJoined_SignUpAndJoinOfOnePersonGiveOneGift_20261127(t *testing.T)
 func TestMemberJoined_NotEnabledSignUpHandlerIsV020_20261127(t *testing.T) {
 	r := newMJRig(t, false)
 	_ = r.deliver(t, r.signup, mjEvent(t, "org.created", "evt_1", "u_ken", "org_flat", ""))
-	if done, _ := r.store.AlreadyDone(context.Background(), MemberJoinedGrantKey("org_flat", "u_ken")); done {
-		t.Fatal("option off: the sign-up handler wrote a new ledger row")
+	// v0.3.1: the sign-up gift always writes the once-per-person key (opted in or not).
+	if done, _ := r.store.AlreadyDone(context.Background(), MemberJoinedGrantKey("org_flat", "u_ken")); !done {
+		t.Fatal("v0.3.1: the once-per-person row was not written with the option off")
 	}
 	if r.gr.last.OrgID != "org_flat" {
 		t.Fatalf("gift on %q", r.gr.last.OrgID)

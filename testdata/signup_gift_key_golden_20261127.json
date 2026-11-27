@@ -1,0 +1,65 @@
+{
+  "about": "Sign-up gift: once per person, per company, whatever the company's rule (Python 0.7.2 / Go 0.3.1). Byte-identical copy in ab0t-quota/tests/ and ab0t-quota-go/testdata/. `keys`: Python signup_gift_keys(policy, user_id=, org_id=, tier_id=, company_org_id=) and Go authevents.SignupGiftOnceKeys(policy, user, org, tier, company) must return exactly `want`. org_id = the org the gift lands on; company_org_id = the company the event names (\"\" = org_id). once_key = member_joined_grant:{company}:{user} (the same for every rule); billing_idempotency_key = the CURRENT rule's key (unchanged, so billing still matches people gifted by an earlier release); already_gifted_keys = once_key, the current rule's dedup key and billing key, then the per-person rules' keys (per_user_per_tier, per_user_global), each kept once, in that order. `scenarios`: each step runs one delivery through the library's own handler (signup = the sign-up handler, joined = the member-joined handler) with the step's rule (credit_grant.dedup) and plan (tier); every company has its own ledger, kept across its steps; `gifted_by_an_earlier_release` seeds the durable marker an earlier release wrote after a successful gift under that rule (Python 0.7.1: the ledger row under the billing key; Go 0.3.0: the ledger row under the dedup key). gift=true: exactly one grant, on billing_org, with billing_key; gift=false: no grant.",
+  "keys": [
+    {"name": "per_user_per_tier", "policy": "per_user_per_tier", "user_id": "u_leo", "org_id": "org_ws_leo_acme", "tier_id": "free", "company_org_id": "org_acme",
+     "want": {"once_key": "member_joined_grant:org_acme:u_leo", "billing_idempotency_key": "user:u_leo:initial_credit:free",
+              "already_gifted_keys": ["member_joined_grant:org_acme:u_leo", "credit_granted:user:u_leo:free", "user:u_leo:initial_credit:free", "credit_granted:user:u_leo", "user:u_leo:initial_credit"]}},
+    {"name": "per_org_per_tier", "policy": "per_org_per_tier", "user_id": "u_leo", "org_id": "org_ws_leo_acme", "tier_id": "free", "company_org_id": "org_acme",
+     "want": {"once_key": "member_joined_grant:org_acme:u_leo", "billing_idempotency_key": "org:org_ws_leo_acme:initial_credit:free",
+              "already_gifted_keys": ["member_joined_grant:org_acme:u_leo", "credit_granted:org:org_ws_leo_acme:free", "org:org_ws_leo_acme:initial_credit:free", "credit_granted:user:u_leo:free", "user:u_leo:initial_credit:free", "credit_granted:user:u_leo", "user:u_leo:initial_credit"]}},
+    {"name": "per_user_global", "policy": "per_user_global", "user_id": "u_leo", "org_id": "org_ws_leo_acme", "tier_id": "free", "company_org_id": "org_acme",
+     "want": {"once_key": "member_joined_grant:org_acme:u_leo", "billing_idempotency_key": "user:u_leo:initial_credit",
+              "already_gifted_keys": ["member_joined_grant:org_acme:u_leo", "credit_granted:user:u_leo", "user:u_leo:initial_credit", "credit_granted:user:u_leo:free", "user:u_leo:initial_credit:free"]}},
+    {"name": "per_org_global", "policy": "per_org_global", "user_id": "u_leo", "org_id": "org_ws_leo_acme", "tier_id": "free", "company_org_id": "org_acme",
+     "want": {"once_key": "member_joined_grant:org_acme:u_leo", "billing_idempotency_key": "org:org_ws_leo_acme:initial_credit",
+              "already_gifted_keys": ["member_joined_grant:org_acme:u_leo", "credit_granted:org:org_ws_leo_acme", "org:org_ws_leo_acme:initial_credit", "credit_granted:user:u_leo:free", "user:u_leo:initial_credit:free", "credit_granted:user:u_leo", "user:u_leo:initial_credit"]}},
+    {"name": "no_company_named_the_billing_org_is_the_company", "policy": "per_user_per_tier", "user_id": "u_ola", "org_id": "org_ws_ola_acme", "tier_id": "pro", "company_org_id": "",
+     "want": {"once_key": "member_joined_grant:org_ws_ola_acme:u_ola", "billing_idempotency_key": "user:u_ola:initial_credit:pro",
+              "already_gifted_keys": ["member_joined_grant:org_ws_ola_acme:u_ola", "credit_granted:user:u_ola:pro", "user:u_ola:initial_credit:pro", "credit_granted:user:u_ola", "user:u_ola:initial_credit"]}},
+    {"name": "another_company_another_once_key", "policy": "per_user_per_tier", "user_id": "u_leo", "org_id": "org_ws_leo_bright", "tier_id": "free", "company_org_id": "org_brightline",
+     "want": {"once_key": "member_joined_grant:org_brightline:u_leo", "billing_idempotency_key": "user:u_leo:initial_credit:free",
+              "already_gifted_keys": ["member_joined_grant:org_brightline:u_leo", "credit_granted:user:u_leo:free", "user:u_leo:initial_credit:free", "credit_granted:user:u_leo", "user:u_leo:initial_credit"]}}
+  ],
+  "scenarios": [
+    {"name": "the_rule_changes_and_an_existing_customer_is_not_gifted_again",
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_leo_1", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_user_global", "gift": true, "billing_org": "org_ws_leo_acme", "billing_key": "user:u_leo:initial_credit"},
+       {"company": "acme", "handler": "signup", "event_id": "evt_leo_2", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_org_per_tier", "gift": false},
+       {"company": "acme", "handler": "signup", "event_id": "evt_ola_1", "user_id": "u_ola", "org_id": "org_acme", "workspace_org_id": "org_ws_ola_acme", "tier": "free", "policy": "per_org_per_tier", "gift": true, "billing_org": "org_ws_ola_acme", "billing_key": "org:org_ws_ola_acme:initial_credit:free"},
+       {"company": "acme", "handler": "signup", "event_id": "evt_ola_2", "user_id": "u_ola", "org_id": "org_acme", "workspace_org_id": "org_ws_ola_acme", "tier": "free", "policy": "per_user_per_tier", "gift": false}
+     ]},
+    {"name": "the_plan_changes_and_the_person_is_not_gifted_again",
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_1", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_user_per_tier", "gift": true, "billing_org": "org_ws_leo_acme", "billing_key": "user:u_leo:initial_credit:free"},
+       {"company": "acme", "handler": "signup", "event_id": "evt_2", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "pro", "policy": "per_user_per_tier", "gift": false}
+     ]},
+    {"name": "gifted_by_an_earlier_release_then_the_rule_changes",
+     "gifted_by_an_earlier_release": [{"company": "acme", "policy": "per_user_global", "user_id": "u_leo", "billing_org": "org_ws_leo_acme", "tier": "free"}],
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_9", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_org_per_tier", "gift": false},
+       {"company": "acme", "handler": "signup", "event_id": "evt_10", "user_id": "u_mia", "org_id": "org_acme", "workspace_org_id": "org_ws_mia_acme", "tier": "free", "policy": "per_org_per_tier", "gift": true, "billing_org": "org_ws_mia_acme", "billing_key": "org:org_ws_mia_acme:initial_credit:free"}
+     ]},
+    {"name": "gifted_by_an_earlier_release_under_the_same_rule",
+     "gifted_by_an_earlier_release": [{"company": "acme", "policy": "per_org_per_tier", "user_id": "u_leo", "billing_org": "org_ws_leo_acme", "tier": "free"}],
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_9", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_org_per_tier", "gift": false}
+     ]},
+    {"name": "a_join_then_the_sign_up_of_one_person_give_one_gift",
+     "steps": [
+       {"company": "acme", "handler": "joined", "event_id": "evt_join", "user_id": "u_maya", "org_id": "org_acme", "workspace_org_id": "org_ws_maya_acme", "tier": "free", "policy": "per_user_per_tier", "gift": true, "billing_org": "org_ws_maya_acme", "billing_key": "user:u_maya:initial_credit:free"},
+       {"company": "acme", "handler": "signup", "event_id": "evt_reg", "user_id": "u_maya", "org_id": "org_acme", "workspace_org_id": "org_ws_maya_acme", "tier": "pro", "policy": "per_org_global", "opted_in": true, "gift": false}
+     ]},
+    {"name": "signed_up_before_the_company_opted_in_then_joins_on_another_plan",
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_reg", "user_id": "u_ken", "org_id": "org_acme", "workspace_org_id": "", "tier": "free", "policy": "per_user_per_tier", "opted_in": false, "gift": true, "billing_org": "org_acme", "billing_key": "user:u_ken:initial_credit:free"},
+       {"company": "acme", "handler": "joined", "event_id": "evt_join", "user_id": "u_ken", "org_id": "org_acme", "workspace_org_id": "", "tier": "pro", "policy": "per_user_per_tier", "gift": false}
+     ]},
+    {"name": "two_companies_each_give_their_own_gift_once",
+     "steps": [
+       {"company": "acme", "handler": "signup", "event_id": "evt_a1", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_user_global", "gift": true, "billing_org": "org_ws_leo_acme", "billing_key": "user:u_leo:initial_credit"},
+       {"company": "brightline", "handler": "signup", "event_id": "evt_b1", "user_id": "u_leo", "org_id": "org_brightline", "workspace_org_id": "org_ws_leo_bright", "tier": "free", "policy": "per_user_global", "gift": true, "billing_org": "org_ws_leo_bright", "billing_key": "user:u_leo:initial_credit"},
+       {"company": "acme", "handler": "signup", "event_id": "evt_a2", "user_id": "u_leo", "org_id": "org_acme", "workspace_org_id": "org_ws_leo_acme", "tier": "free", "policy": "per_org_per_tier", "gift": false},
+       {"company": "brightline", "handler": "signup", "event_id": "evt_b2", "user_id": "u_leo", "org_id": "org_brightline", "workspace_org_id": "org_ws_leo_bright", "tier": "free", "policy": "per_org_global", "gift": false}
+     ]}
+  ]
+}

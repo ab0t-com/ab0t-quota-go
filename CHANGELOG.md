@@ -3,6 +3,46 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.3.1] — 2026-11-27
+
+A PATCH: your code compiles unchanged, no setting changed, and `CreditGrantRequest.IdempotencyKey` (what
+your granter sends to billing) is the same as before. Same contract as the Python `ab0t-quota` 0.7.2. A
+copy-paste notice for your team: [`migrations/v0.3.0-to-v0.3.1/CLIENT_NOTICE.md`](migrations/v0.3.0-to-v0.3.1/CLIENT_NOTICE.md).
+
+### Fixed
+
+- **Changing your sign-up rule no longer gives existing customers the gift again.** The default sign-up
+  handler's "already given" marker was derived from your rule (`credit_grant.dedup`) and, for the per-plan
+  rules, from the person's plan. After a rule change (or a plan change under a per-plan rule) the new
+  marker matched none of the old ones, so an existing customer whose sign-up was handled again got the
+  gift a second time. The gift is now **once per person, per company, whatever the rule**: the handler
+  always checks and writes `MemberJoinedGrantKey(company, user)` (the key the member-joined gift already
+  uses, so a sign-up and a join still share it), with or without `MemberJoinedEnabled`. Your rule can
+  still make the gift rarer (`per_org_global`: one gift per org); it can no longer make it happen twice
+  for one person.
+- **People gifted by an earlier release are not gifted again.** A ledger marker written before v0.3.1
+  still counts: the current rule's key, and the keys a per-person rule (`per_user_per_tier`,
+  `per_user_global`) wrote for that person. The key sent to billing is still the current rule's key, so
+  billing's own records for those people keep matching.
+- Unchanged: every one of these checks fails closed (an unreadable ledger is an error, the delivery is
+  retried, nothing is granted).
+
+### Added
+
+- `authevents.SignupGiftOnceKeys(policy, userID, orgID, tierID, companyOrgID) SignupGiftKeys` — pure:
+  the once-key, the key billing receives, and every key that means "already gifted". Shared vectors
+  with the Python library: `testdata/signup_gift_key_golden_20261127.json`.
+
+### Known limits
+
+- The guard lives in your ledger. Billing still dedups on the current rule's key only, so with an
+  in-memory ledger (lost on restart) and a changed rule, a re-handled sign-up can still reach billing
+  with a key it has not seen. Use a durable ledger (DynamoDB or Redis).
+- A person gifted **before v0.3.1** under a per-ORG rule (`per_org_per_tier`, `per_org_global`), whose
+  company then switches to a per-person rule, is not recognised: per-org markers name an org, not a
+  person, and reading them as "this person was gifted" would refuse the gift to new people of a shared
+  org. Everyone gifted from v0.3.1 on carries the once-per-person key.
+
 ## [0.3.0] — 2026-11-27
 
 **A MINOR: your code compiles unchanged, and ONE default changed** — a `quota-config.json` that omits

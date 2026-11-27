@@ -66,7 +66,7 @@ package and `go build` fetches it.
 ### 1. Pin a version in your go.mod
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.2.0
+go get github.com/ab0t-com/ab0t-quota-go@v0.3.1
 ```
 
 Or pin to a specific commit:
@@ -194,7 +194,7 @@ proxy. The repo is currently public so this isn't needed.
 When two of your dependencies require this lib, Go picks the **higher**
 of the two requested versions — never the lower, never the highest
 available. To force a newer version than the modules ask for, run
-`go get github.com/ab0t-com/ab0t-quota-go@v0.2.0` in your top-level
+`go get github.com/ab0t-com/ab0t-quota-go@v0.3.1` in your top-level
 module and commit the resulting `go.mod`/`go.sum`.
 
 ---
@@ -210,7 +210,7 @@ single static binary per (OS, arch).
 If you have a Go toolchain:
 
 ```bash
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.2.0
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.1
 ```
 
 This drops a `quotactl` binary into `$GOBIN` (or `$GOPATH/bin`). It

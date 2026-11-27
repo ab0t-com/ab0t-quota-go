@@ -30,6 +30,9 @@ type CreditGrantDeps struct {
 	// MemberJoinedEnabled (v0.3.0) — the company opted in (auth_events.grant_on_member_joined): the
 	// sign-up handler also checks and writes MemberJoinedGrantKey, so a sign-up and a join of the
 	// same person give ONE gift. false = the v0.2.0 handler exactly.
+	// v0.3.1: the sign-up handler ALWAYS keeps the gift once per person per company (SignupGiftOnceKeys),
+	// so this field no longer changes it; quota.Setup still uses the opt-in to register the
+	// member-joined handler.
 	MemberJoinedEnabled bool
 }
 
@@ -42,6 +45,10 @@ const EventMemberJoined = "org.member.added"
 // company's sign-up gift" — once per person per company, under any tier or dedup rule, whichever
 // event arrives first. companyOrgID is the event's org (the org joined). Same key as the Python
 // library (compose_member_joined_grant_key).
+//
+// v0.3.1: this is THE once-per-person-per-company key of the sign-up gift — the sign-up handler
+// always checks and writes it, opted in or not (SignupGiftOnceKeys). The text keeps its v0.3.0 name
+// so markers already written still count.
 func MemberJoinedGrantKey(companyOrgID, userID string) string {
 	return "member_joined_grant:" + companyOrgID + ":" + userID
 }
@@ -163,6 +170,53 @@ func BillingIdempotencyKey(policy, userID, orgID, tierID string) string {
 	}
 }
 
+// SignupGiftKeys (v0.3.1) — the keys that keep the sign-up gift once per person per company.
+type SignupGiftKeys struct {
+	// OnceKey is MemberJoinedGrantKey(company, user): the key the member-joined gift already uses,
+	// so a sign-up and a join of one person still share it.
+	OnceKey string `json:"once_key"`
+	// BillingIdempotencyKey is what billing receives: the CURRENT rule's key, unchanged, so
+	// billing's records for people gifted by an earlier release still match it.
+	BillingIdempotencyKey string `json:"billing_idempotency_key"`
+	// AlreadyGiftedKeys — a marker under ANY of these means "already gifted": the once-key, the
+	// current rule's dedup and billing keys, and the keys a per-person rule wrote for this person
+	// (this plan, or any plan).
+	AlreadyGiftedKeys []string `json:"already_gifted_keys"`
+}
+
+// SignupGiftOnceKeys (v0.3.1) — the sign-up gift is once per person per company, whatever the
+// company's rule says. Before, the gift's "already given" markers were derived from the rule
+// (credit_grant.dedup) alone, so a company that changed its rule (or a person whose plan changed
+// under a per-plan rule) got keys that matched none of the old markers, and an existing customer
+// whose sign-up was handled again got the gift a second time.
+//
+// Pure (no I/O). orgID is the org the gift lands on; companyOrgID is the company the person signed
+// up to or joined (the event's org; "" = orgID). Keys an earlier release wrote under a per-ORG rule
+// are honoured only while that rule is in force: they name an org, not a person, and reading them
+// as "this person was gifted" would deny the gift to new people in a shared org. Same vectors as the
+// Python library (signup_gift_keys): testdata/signup_gift_key_golden_20261127.json.
+func SignupGiftOnceKeys(policy, userID, orgID, tierID, companyOrgID string) SignupGiftKeys {
+	company := firstNonEmpty(companyOrgID, orgID)
+	k := SignupGiftKeys{
+		OnceKey:               MemberJoinedGrantKey(company, userID),
+		BillingIdempotencyKey: BillingIdempotencyKey(policy, userID, orgID, tierID),
+	}
+	candidates := []string{k.OnceKey, ComposeCreditDedupKey(policy, userID, orgID, tierID), k.BillingIdempotencyKey}
+	for _, perPerson := range []string{string(config.DedupPerUserPerTier), string(config.DedupPerUserGlobal)} {
+		candidates = append(candidates,
+			ComposeCreditDedupKey(perPerson, userID, orgID, tierID),
+			BillingIdempotencyKey(perPerson, userID, orgID, tierID))
+	}
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		if !seen[c] {
+			seen[c] = true
+			k.AlreadyGiftedKeys = append(k.AlreadyGiftedKeys, c)
+		}
+	}
+	return k
+}
+
 // CreditGrantHooks lets consumers observe the lifecycle. Optional.
 type CreditGrantHooks struct {
 	OnSkipped func(reason string, event Event)
@@ -182,6 +236,11 @@ type CreditGrantHooks struct {
 // v0.3.0: the gift lands on data.workspace_org_id when the event names the person's own workspace
 // (GetWorkspaceOrgID), else on the event org as before; with deps.MemberJoinedEnabled it also keeps
 // the gift once per person per company (MemberJoinedGrantKey).
+//
+// v0.3.1: always once per person per company, whatever the rule or plan (SignupGiftOnceKeys): the
+// once-key and every key an earlier release wrote for this gift are checked FAIL-CLOSED (an
+// unreadable ledger is an error, so the delivery is retried, never a second gift); the key sent to
+// billing is unchanged.
 func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, error) {
 	return buildCreditGrantHandler(deps, false)
 }
@@ -249,8 +308,9 @@ func buildCreditGrantHandler(deps CreditGrantDeps, memberMode bool) (*Idempotent
 				hooks.OnSkipped("missing user_id", ev)
 				return hctx.Skip("missing user_id")
 			}
-			if deps.MemberJoinedEnabled && orgID != "" {
-				onceKey = MemberJoinedGrantKey(orgID, userID) // the company = the org the event names
+			// v0.3.1: always — once per person per company (the company = the org the event names).
+			if orgID != "" {
+				onceKey = MemberJoinedGrantKey(orgID, userID)
 			}
 			// v0.3.0: auth names the person's own workspace — the account the company bills.
 			if ws := ev.GetWorkspaceOrgID(); ws != "" {
@@ -313,6 +373,18 @@ func buildCreditGrantHandler(deps CreditGrantDeps, memberMode bool) (*Idempotent
 		}
 		dedupKey := ComposeCreditDedupKey(policy, userID, orgID, tierID)
 		hctx.DedupKey = dedupKey
+		// v0.3.1: once per person per company, whatever the rule (SignupGiftOnceKeys). A pin-store
+		// resolved org (no org in the event) is the company too.
+		giftKeys := SignupGiftOnceKeys(policy, userID, orgID, tierID, "")
+		if onceKey == "" {
+			onceKey = giftKeys.OnceKey
+		}
+		alreadyGiftedKeys := []string{onceKey}
+		for _, k := range giftKeys.AlreadyGiftedKeys[1:] {
+			if k != onceKey {
+				alreadyGiftedKeys = append(alreadyGiftedKeys, k)
+			}
+		}
 
 		// v0.2.0: the grant is ALSO keyed on the SOURCE event — one event produces at most one
 		// grant under any dedup rule, so a company that changes credit_grant.dedup and re-handles an
@@ -329,29 +401,25 @@ func buildCreditGrantHandler(deps CreditGrantDeps, memberMode bool) (*Idempotent
 				return hctx.Skip("source event already granted")
 			}
 		}
-		// v0.3.0: once per person per company — FAIL CLOSED (an unreadable ledger is an error, so the
-		// delivery is retried; nothing has been granted yet).
-		if onceKey != "" {
-			if hctx.Store == nil {
-				return errors.New("credit grant: no ledger store to keep the gift once per person")
-			}
-			done, err := hctx.Store.AlreadyDone(ctx, onceKey)
+		// v0.3.0 / v0.3.1: once per person per company — the once-key, the current rule's key, or a
+		// key an earlier release wrote for this person. FAIL CLOSED (an unreadable ledger is an error,
+		// so the delivery is retried; nothing has been granted yet).
+		if hctx.Store == nil {
+			return errors.New("credit grant: no ledger store to keep the gift once per person")
+		}
+		for _, k := range alreadyGiftedKeys {
+			done, err := hctx.Store.AlreadyDone(ctx, k)
 			if err != nil {
 				return fmt.Errorf("once-per-person check: %w", err)
 			}
+			if done && k == dedupKey { // the current rule's own key: same reasons as before
+				hooks.OnSkipped("business dedup hit: "+dedupKey, ev)
+				return hctx.Skip("already granted: " + dedupKey)
+			}
 			if done {
-				hooks.OnSkipped("already got this company's sign-up gift: "+onceKey, ev)
+				hooks.OnSkipped("already got this company's sign-up gift: "+k, ev)
 				return hctx.Skip("already got this company's sign-up gift")
 			}
-		}
-
-		already, err := hctx.AlreadyDone(ctx)
-		if err != nil {
-			return fmt.Errorf("dedup check: %w", err)
-		}
-		if already {
-			hooks.OnSkipped("business dedup hit: "+dedupKey, ev)
-			return hctx.Skip("already granted: " + dedupKey)
 		}
 
 		req := CreditGrantRequest{
@@ -388,7 +456,7 @@ func buildCreditGrantHandler(deps CreditGrantDeps, memberMode bool) (*Idempotent
 			}); err != nil {
 				slog.Warn("mark source-event dedup failed", "key", eventKey, "err", err)
 			}
-			if onceKey != "" {
+			if onceKey != "" { // always set since v0.3.1
 				if err := hctx.Store.MarkDone(ctx, handlerledger.MarkDoneInput{
 					DedupKey: onceKey, SourceHandler: hctx.HandlerName, SourceEventID: ev.GetEventID(),
 					SideEffectID: req.IdempotencyKey,

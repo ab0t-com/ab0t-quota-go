@@ -33,8 +33,8 @@ Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 ## Install (pin a version)
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.3.0
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.0   # the CLI
+go get github.com/ab0t-com/ab0t-quota-go@v0.3.1
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.1   # the CLI
 ```
 
 Pre-1.0: read the [CHANGELOG](CHANGELOG.md) (and `migrations/` when present)
