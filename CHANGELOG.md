@@ -3,6 +3,79 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.3.0] — 2026-11-27
+
+**A MINOR: your code compiles unchanged, and ONE default changed** — a `quota-config.json` that omits
+`enforcement.enabled` now runs with quotas **ENFORCED** (and a `credit_grant` that omits
+`reset_on_downgrade` now resets on a downgrade), as the Python library always did. Set both keys
+explicitly to keep the old behaviour (M0 below). Two things are new: Setup sends your declared prices
+to billing, and a company can give its sign-up gift to people who join with an account they already
+have. Same contract as the Python `ab0t-quota` 0.7.1. Read
+[`migrations/v0.2.0-to-v0.3.0/`](migrations/v0.2.0-to-v0.3.0/MIGRATION.md) (a read-only checker that
+flags a config omitting either key, and a copy-paste notice for your team).
+
+### Migrating from 0.2.0
+
+| # | What | 0.2.0 | 0.3.0 | Your action |
+|---|---|---|---|---|
+| M0 | ⚠ **`enforcement.enabled` / `credit_grant.reset_on_downgrade` omitted from the config FILE** | false / false (enforcement off: EVERY request allowed; no reset on a downgrade) | **true / true** (quotas ENFORCED; the grant's balance is reset when the org moves to a lower tier) — Python parity; one warning per omitted key | To keep the old behaviour: `"enforcement": {"enabled": false}` and `"reset_on_downgrade": false` in each `credit_grant`. A `Config` built in Go code is unaffected |
+| M1 | Your price list | `pricing.products` was read only by `meter` in your process | `quota.Setup` **sends your declared prices to billing once** (`PUT /billing/price-list/{service_name}`, your billing key) in a goroutine — Setup never waits; billing down = retried with capped backoff (30 s → 300 s); 404 (billing has no route yet) and other refusals are not retried. `Capabilities().PriceList` says what happened | Nothing. To keep your prices out of billing: `"billing_integration": {"price_list": false}` |
+| M2 | Sign-up gift for a person who **joins** with an existing account | none | **opt in**: `"auth_events": {"grant_on_member_joined": true}` registers a handler on auth's `org.member.added`; the tier's sign-up grant, **once per person per company** (the sign-up handler shares the once-key) | Only if you want it; subscribe your webhook to `org.member.added` too |
+| M3 | Where the default sign-up gift lands | the event's org | the person's own workspace when the event names it (`data.workspace_org_id`), else the event's org | Nothing — until auth sends the field nothing changes |
+
+### Added
+
+- `meter.BuildPriceList`, `meter.CanonicalPriceListProducts`, `meter.PriceListVersion`,
+  `meter.CanonicalJSON`, `meter.PriceList` / `PriceListProduct` / `PriceListVariant`,
+  `meter.PriceListSchema` — the canonical body: money as canonical strings (`billing.Money.String()`),
+  `version` = `"sha256:" +` the hash of the canonical products JSON (keys sorted, no whitespace, no HTML
+  escaping); prices that break `ParsePricing`'s rules are an `ErrConfig` and are never published.
+- `meter.Meter` adds `metadata.service` (the `Config.ToolID`) next to `product` / `variant` on the reserve
+  and on every lifecycle event, so billing can find the price list the event belongs to (the SNS path
+  carries no service header). Not added for the `"default"` tool id.
+- `meter.MaxPriceListVariants` (500) — with "no `#` in a product or variant id", rules billing enforces,
+  checked before publishing. Billing recomputes `version` and refuses a mismatch.
+- `billing.(*Client).PublishPriceList`, `billing.PriceListOutcome`, `billing.ClassifyPriceListStatus` and
+  the outcomes `PriceListPublished` / `PriceListRetry` / `PriceListUnsupported` / `PriceListRefused`.
+- `quota.Capabilities.PriceList` / `PriceListAttempts` / `PriceListFailures` (informational — not part
+  of `Healthy()`); `quota.PriceListRetryBackoff`.
+- `authevents.EventMemberJoined`, `authevents.PlanMemberJoinedGrant` (pure), `authevents.MemberJoinedPlan`,
+  `authevents.MemberJoinedGrantKey`, `authevents.BuildMemberJoinedCreditGrantHandler`,
+  `authevents.RegisterMemberJoinedCreditGrantHandler`, `authevents.CreditGrantDeps.MemberJoinedEnabled`,
+  `authevents.Event.GetWorkspaceOrgID` / `GetBillingOrgID`. The once-only check fails closed: an
+  unreadable ledger is an error (the delivery is retried), never a second gift.
+- `config.AuthEventsConfig` (`Config.AuthEvents`), `config.BillingIntegrationConfig.PriceList` +
+  `PriceListEnabled()`, `config.ValidateAuthEventsBlock` — `auth_events` may hold only
+  `grant_on_member_joined` (a boolean); a typo is refused at load.
+- `config.EnforcementEnabledUnsetWarning`, `config.ResetOnDowngradeUnsetWarning` — the texts
+  `config.Warnings()` (logged by `quota.Setup`, `Capabilities.ConfigWarnings`) prints for an omitted key;
+  the Python library prints the same.
+
+### Changed (behaviour) — the one breaking default change of this minor
+
+- ⚠ **`config.LoadConfig`: a config file that omits `enforcement.enabled` now loads it as `true`** (it was
+  Go's zero value `false`: enforcement off, EVERY request allowed), and **a `credit_grant` that omits
+  `reset_on_downgrade` now loads it as `true`** (it was `false`) — the Python library's defaults. Each
+  omitted key is warned at startup ("the default is now true …; it was false … before v0.3.0 — set it
+  explicitly to keep the old Go behaviour"). Keep the old behaviour by writing
+  `"enforcement": {"enabled": false}` / `"reset_on_downgrade": false`. A `Config` (or `CreditGrant`) built in
+  Go code keeps exactly the values it was given; a grant synthesized from a legacy `initial_credit` keeps
+  `false`. The explicit-false enforcement warning now says what an omitted key means. The `CreditGrant`
+  comment that claimed `reset_on_downgrade` defaulted to true (it never did) is corrected.
+
+### Shared vectors (Go ↔ Python)
+
+- `testdata/price_list_golden_20261127.json`, `testdata/member_joined_golden_20261127.json` and
+  `testdata/config_default_warnings_golden_20261127.json`, byte-identical to the Python library's `tests/`
+  copies and read by both test suites.
+
+### Known gap (unchanged in this release, recorded)
+
+- The default sign-up handler still listens to `org.created` / `user.org_assigned`; the Python library
+  listens to `auth.user.registered`, which is what the auth service delivers. A Go consumer that wants
+  the gift on sign-up registers its own handler on `auth.user.registered` today
+  (`authevents.OnAuthEvent("auth.user.registered", h)` with `BuildDefaultCreditGrantHandler`).
+
 ## [0.2.0] — 2026-11-27
 
 **A MINOR: one default changed (an unresolved tier now fails closed), and two behaviours you could

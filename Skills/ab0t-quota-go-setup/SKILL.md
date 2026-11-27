@@ -11,7 +11,7 @@ field on the returned `*quota.Quota`.
 ## Install
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
+go get github.com/ab0t-com/ab0t-quota-go@v0.2.0
 ```
 
 Public Go module — no `GOPRIVATE` needed. The git tag IS the release.

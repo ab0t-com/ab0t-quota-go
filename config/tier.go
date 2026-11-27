@@ -97,6 +97,11 @@ type CreditGrant struct {
 	ResetOnDowngrade   bool              `json:"reset_on_downgrade"`
 	ResetOnUpgrade     bool              `json:"reset_on_upgrade"`
 	Dedup              DedupPolicy       `json:"dedup,omitempty"`
+
+	// resetOnDowngradeUnset (v0.3.0) is true when LoadConfig read this credit_grant from a config
+	// file WITHOUT a reset_on_downgrade key (LoadConfig then set ResetOnDowngrade = true): Warnings()
+	// names it. Go-code literals never set it.
+	resetOnDowngradeUnset bool
 }
 
 // Validate enforces cross-field rules.
@@ -129,10 +134,11 @@ func (c *CreditGrant) applyDefaults() {
 	if c.Dedup == "" {
 		c.Dedup = DedupPerUserPerTier
 	}
-	// ResetOnDowngrade defaults to true; ResetOnUpgrade defaults to false.
-	// Zero values for bools = false, so the loader applies these via
-	// presence-tracking in a custom unmarshal. For simplicity here, schema
-	// requires explicit values for the booleans.
+	// ResetOnDowngrade / ResetOnUpgrade: no default is applied HERE. Since v0.3.0 LoadConfig sets
+	// reset_on_downgrade to TRUE when a config file's credit_grant omits it (markUnsetDefaults; Python
+	// parity) and warns (ResetOnDowngradeUnsetWarning); before v0.3.0 the zero value false ran (this
+	// comment used to claim true). A CreditGrant built in Go code keeps the value it was given (zero =
+	// false). ResetOnUpgrade has no default other than false (Python: false too).
 }
 
 // TierLimit holds one resource's tier-level limit + optional thresholds.

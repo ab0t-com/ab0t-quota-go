@@ -1,0 +1,32 @@
+{
+  "about": "Member-joined sign-up gift plan (0.8.0 / Go 0.3.0): what the library does with one `org.member.added` delivery. Byte-identical copy in ab0t-quota/tests/ and ab0t-quota-go/testdata/. Python plan_member_joined_grant(event, enabled=...) and Go authevents.PlanMemberJoinedGrant(event, enabled) must return exactly `plan` (all seven fields). user_id = data.user_id else top-level user_id; company_org_id = data.org_id else data.organization_id else top-level tenant_id; billing_org_id = data.workspace_org_id (non-blank) else company_org_id; once_key = member_joined_grant:{company}:{user}; source_event_key = credit_grant_event:{event_id else id}. A skip leaves billing_org_id / once_key / source_event_key empty.",
+  "event_type": "org.member.added",
+  "cases": [
+    {"name": "joins_with_an_existing_account_gift_on_her_own_workspace", "enabled": true,
+     "event": {"event_id": "evt_1", "event_type": "org.member.added", "tenant_id": "org_brightline_customers",
+               "data": {"user_id": "u_maya", "org_id": "org_brightline_customers", "role": "member", "join_method": "primitive_insert", "workspace_org_id": "org_ws_maya_brightline"}},
+     "plan": {"action": "grant", "reason": "", "user_id": "u_maya", "company_org_id": "org_brightline_customers", "billing_org_id": "org_ws_maya_brightline", "once_key": "member_joined_grant:org_brightline_customers:u_maya", "source_event_key": "credit_grant_event:evt_1"}},
+    {"name": "no_workspace_named_gift_on_the_joined_org", "enabled": true,
+     "event": {"event_id": "evt_2", "event_type": "org.member.added",
+               "data": {"user_id": "u_ken", "org_id": "org_flat_company", "role": "member", "join_method": "primitive_insert"}},
+     "plan": {"action": "grant", "reason": "", "user_id": "u_ken", "company_org_id": "org_flat_company", "billing_org_id": "org_flat_company", "once_key": "member_joined_grant:org_flat_company:u_ken", "source_event_key": "credit_grant_event:evt_2"}},
+    {"name": "blank_workspace_is_ignored", "enabled": true,
+     "event": {"event_id": "evt_3", "data": {"user_id": "u_ken", "org_id": "org_flat_company", "workspace_org_id": "   "}},
+     "plan": {"action": "grant", "reason": "", "user_id": "u_ken", "company_org_id": "org_flat_company", "billing_org_id": "org_flat_company", "once_key": "member_joined_grant:org_flat_company:u_ken", "source_event_key": "credit_grant_event:evt_3"}},
+    {"name": "company_has_not_opted_in", "enabled": false,
+     "event": {"event_id": "evt_4", "data": {"user_id": "u_maya", "org_id": "org_brightline_customers", "workspace_org_id": "org_ws_maya_brightline"}},
+     "plan": {"action": "skip", "reason": "not_enabled", "user_id": "u_maya", "company_org_id": "org_brightline_customers", "billing_org_id": "", "once_key": "", "source_event_key": ""}},
+    {"name": "no_user_id", "enabled": true,
+     "event": {"event_id": "evt_5", "data": {"org_id": "org_brightline_customers"}},
+     "plan": {"action": "skip", "reason": "missing_user_id", "user_id": "", "company_org_id": "org_brightline_customers", "billing_org_id": "", "once_key": "", "source_event_key": ""}},
+    {"name": "no_org_anywhere", "enabled": true,
+     "event": {"event_id": "evt_6", "data": {"user_id": "u_maya"}},
+     "plan": {"action": "skip", "reason": "missing_org_id", "user_id": "u_maya", "company_org_id": "", "billing_org_id": "", "once_key": "", "source_event_key": ""}},
+    {"name": "org_from_the_envelope_tenant_and_user_from_the_envelope", "enabled": true,
+     "event": {"id": "evt_7", "type": "org.member.added", "tenant_id": "org_envelope_tenant", "user_id": "u_env", "data": {}},
+     "plan": {"action": "grant", "reason": "", "user_id": "u_env", "company_org_id": "org_envelope_tenant", "billing_org_id": "org_envelope_tenant", "once_key": "member_joined_grant:org_envelope_tenant:u_env", "source_event_key": "credit_grant_event:evt_7"}},
+    {"name": "organization_id_alias", "enabled": true,
+     "event": {"event_id": "evt_8", "data": {"user_id": "u_ann", "organization_id": "org_alias"}},
+     "plan": {"action": "grant", "reason": "", "user_id": "u_ann", "company_org_id": "org_alias", "billing_org_id": "org_alias", "once_key": "member_joined_grant:org_alias:u_ann", "source_event_key": "credit_grant_event:evt_8"}}
+  ]
+}

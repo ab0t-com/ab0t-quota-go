@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,24 @@ func (e Event) GetOrgID() string {
 		return v
 	}
 	return e.TenantID
+}
+
+// GetWorkspaceOrgID (v0.3.0) returns data.workspace_org_id — the person's OWN workspace org under
+// the org they joined (workspace-per-user companies) — trimmed; "" when auth does not name one.
+func (e Event) GetWorkspaceOrgID() string {
+	if v, ok := e.Data["workspace_org_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// GetBillingOrgID (v0.3.0) is the org a sign-up gift lands on: GetWorkspaceOrgID when auth names
+// one, else GetOrgID. Same rule as the Python library (event_billing_org).
+func (e Event) GetBillingOrgID() string {
+	if ws := e.GetWorkspaceOrgID(); ws != "" {
+		return ws
+	}
+	return e.GetOrgID()
 }
 
 // GetEmail returns data.email if present.

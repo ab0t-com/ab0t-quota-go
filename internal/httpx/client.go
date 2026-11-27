@@ -154,6 +154,15 @@ func (c *Client) PUT(ctx context.Context, path string, in, out any) error {
 	return c.sendJSON(ctx, "PUT", path, in, out)
 }
 
+// PUTRaw (v0.3.0) issues a PUT with body sent byte-for-byte (already-encoded canonical JSON —
+// re-encoding would HTML-escape it and change the bytes a version hash was computed over).
+func (c *Client) PUTRaw(ctx context.Context, path string, body []byte, out any) error {
+	if body == nil {
+		body = []byte{}
+	}
+	return c.send(ctx, "PUT", path, body, out)
+}
+
 // DELETE issues a DELETE.
 func (c *Client) DELETE(ctx context.Context, path string, out any) error {
 	return c.send(ctx, "DELETE", path, nil, out)

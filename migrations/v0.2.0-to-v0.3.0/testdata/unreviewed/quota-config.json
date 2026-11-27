@@ -1,0 +1,11 @@
+{
+  "service_name": "example-render",
+  "storage": {"redis_url": "memory://"},
+  "tiers": [
+    {"tier_id": "free", "display_name": "Free",
+     "credit_grant": {"trigger": "signup", "amount_per_period": "5", "lifecycle": "persistent", "destination": "credit_balance"}}
+  ],
+  "pricing": {
+    "products": {"render_job": {"variants": {"cpu": {"price_per_hour": "0.50", "allocation_price": "0"}}}}
+  }
+}

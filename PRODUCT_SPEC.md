@@ -48,7 +48,7 @@ ab0t-quota-go/
 ├── go.mod
 ├── go.sum
 ├── .golangci.yml                      (linter config)
-├── .github/workflows/ci.yml           (Go 1.22+, lint, test, race, coverage)
+├── .githooks/pre-commit               (local gitleaks scan — NO GitHub Actions / CI in this repo; owner rule 2026-11-27)
 │
 ├── quota/                             [PACKAGE: top-level public API]
 │   ├── doc.go                         package doc, godoc-friendly overview

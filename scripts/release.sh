@@ -59,8 +59,10 @@ echo "==> gitleaks scan"
 if command -v gitleaks >/dev/null 2>&1; then
   scripts/scan.sh
 else
-  echo "WARNING: gitleaks not installed; skipping local secret scan." >&2
-  echo "CI still scans, but you'll only discover findings after pushing." >&2
+  # No CI exists (owner rule: no GitHub Actions in our repos) — this local scan is the only one, so it cannot be skipped.
+  echo "ERROR: gitleaks is not installed — the release secret scan cannot run, so the release is refused." >&2
+  echo "  Install: https://github.com/gitleaks/gitleaks#installing" >&2
+  exit 1
 fi
 
 # 4. Cross-build.

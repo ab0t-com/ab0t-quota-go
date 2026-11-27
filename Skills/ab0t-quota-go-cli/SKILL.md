@@ -11,7 +11,7 @@ Eight subcommands. Each takes `--help` for full flags.
 
 ```bash
 # Option 1 — from source (needs Go toolchain)
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.2.0
 
 # Option 2 — download prebuilt
 VERSION=v0.1.10

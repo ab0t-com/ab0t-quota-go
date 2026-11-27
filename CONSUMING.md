@@ -66,7 +66,7 @@ package and `go build` fetches it.
 ### 1. Pin a version in your go.mod
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.1.10
+go get github.com/ab0t-com/ab0t-quota-go@v0.2.0
 ```
 
 Or pin to a specific commit:
@@ -210,7 +210,7 @@ single static binary per (OS, arch).
 If you have a Go toolchain:
 
 ```bash
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.10
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.2.0
 ```
 
 This drops a `quotactl` binary into `$GOBIN` (or `$GOPATH/bin`). It

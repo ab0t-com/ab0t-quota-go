@@ -49,8 +49,9 @@ It **stages** the release artifacts under `release/` and **stops there** — it 
 
 ## Version policy (semver)
 
-- **PATCH** (`v0.1.3 → v0.1.4`) — bug fixes, internal changes, nothing a caller
-  must react to.
+- **PATCH** (`v0.1.3 → v0.1.4`) — bug fixes, internal changes, and **additive features**
+  (new options / APIs / fields with every existing default unchanged) — nothing a caller
+  must react to. **When in doubt, PATCH.**
 - **MINOR** (`v0.1.x → v0.2.0`) — **any breaking change**: a new required config
   field, a changed default that can make a mis-configured service refuse to start,
   a required parameter added, a changed error contract. If a caller must do
@@ -79,6 +80,9 @@ It **stages** the release artifacts under `release/` and **stops there** — it 
    `https://github.com/ab0t-com/ab0t-quota-go/releases/tag/vX.Y.Z`
 5. Tell consumers the new version is available. **Do not assume they auto-adopt** —
    a `go get` bump is theirs to make.
+6. Last step, every release: regenerate the SDK catalog (`gen_sdk_catalog.py`), run the
+   library pin check (`check_library_pins.py`), and bump every consumer it lists (service
+   `go.mod` pins, docs, skills, website install lines) until it passes.
 
 ## Recovery from a half-pushed state
 

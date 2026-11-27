@@ -28,6 +28,8 @@ type Config struct {
 	Reconciliation     ReconciliationConfig     `json:"reconciliation,omitempty"`
 	Pricing            json.RawMessage          `json:"pricing,omitempty"`      // out of scope for v0.1.0; raw for forward-compat
 	BridgeCache        json.RawMessage          `json:"bridge_cache,omitempty"` // out of scope; raw
+	// AuthEvents (v0.3.0): the company's sign-up-gift switches (auth_events.grant_on_member_joined).
+	AuthEvents AuthEventsConfig `json:"auth_events,omitempty"`
 
 	// Extra captures unknown top-level keys. Never used at runtime; exists
 	// so a Python schema addition doesn't break Go consumers.

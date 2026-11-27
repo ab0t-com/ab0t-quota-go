@@ -27,6 +27,73 @@ type CreditGrantDeps struct {
 	Ledger       handlerledger.LedgerStore
 	Granter      CreditGranter
 	Hooks        *CreditGrantHooks // optional
+	// MemberJoinedEnabled (v0.3.0) — the company opted in (auth_events.grant_on_member_joined): the
+	// sign-up handler also checks and writes MemberJoinedGrantKey, so a sign-up and a join of the
+	// same person give ONE gift. false = the v0.2.0 handler exactly.
+	MemberJoinedEnabled bool
+}
+
+// EventMemberJoined (v0.3.0) is auth's webhook event for every NEW membership (data: user_id,
+// org_id, role, join_method[, workspace_org_id]). auth.user.registered is sent only for a new
+// ACCOUNT, so a person joining a second company never got that company's sign-up gift.
+const EventMemberJoined = "org.member.added"
+
+// MemberJoinedGrantKey (v0.3.0) is the durable ledger key of "this person already got this
+// company's sign-up gift" — once per person per company, under any tier or dedup rule, whichever
+// event arrives first. companyOrgID is the event's org (the org joined). Same key as the Python
+// library (compose_member_joined_grant_key).
+func MemberJoinedGrantKey(companyOrgID, userID string) string {
+	return "member_joined_grant:" + companyOrgID + ":" + userID
+}
+
+// MemberJoinedPlan (v0.3.0) is what the member-joined handler does with one event. Shared vectors
+// with the Python library: testdata/member_joined_golden_20261127.json.
+type MemberJoinedPlan struct {
+	Action         string `json:"action"` // "grant" | "skip"
+	Reason         string `json:"reason"` // "" | not_enabled | missing_user_id | missing_org_id
+	UserID         string `json:"user_id"`
+	CompanyOrgID   string `json:"company_org_id"`
+	BillingOrgID   string `json:"billing_org_id"`
+	OnceKey        string `json:"once_key"`
+	SourceEventKey string `json:"source_event_key"`
+}
+
+func dataString(ev Event, key string) string {
+	v, _ := ev.Data[key].(string)
+	return v
+}
+
+// PlanMemberJoinedGrant (v0.3.0) — pure, no I/O. user = data.user_id, else the envelope user_id;
+// company = data.org_id, else data.organization_id, else the envelope tenant_id; the gift lands on
+// data.workspace_org_id (non-blank), else on the company org. Same rule as the Python library
+// (plan_member_joined_grant).
+func PlanMemberJoinedGrant(ev Event, enabled bool) MemberJoinedPlan {
+	user := firstNonEmpty(dataString(ev, "user_id"), ev.UserIDTop)
+	company := firstNonEmpty(dataString(ev, "org_id"), dataString(ev, "organization_id"), ev.TenantID)
+	p := MemberJoinedPlan{Action: "skip", UserID: user, CompanyOrgID: company}
+	switch {
+	case !enabled:
+		p.Reason = "not_enabled"
+	case user == "":
+		p.Reason = "missing_user_id"
+	case company == "":
+		p.Reason = "missing_org_id"
+	default:
+		p.Action = "grant"
+		p.BillingOrgID = firstNonEmpty(ev.GetWorkspaceOrgID(), company)
+		p.OnceKey = MemberJoinedGrantKey(company, user)
+		p.SourceEventKey = SourceEventGrantKey(ev.GetEventID())
+	}
+	return p
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // TierProvider resolves user → tier_id. Mirrors the Python ABC.
@@ -111,7 +178,24 @@ type CreditGrantHooks struct {
 //  3. looks up tier in Config; bails if no credit_grant or amount=0
 //  4. composes business dedup key per tier.credit_grant.dedup policy
 //  5. calls Granter.GrantCredit
+//
+// v0.3.0: the gift lands on data.workspace_org_id when the event names the person's own workspace
+// (GetWorkspaceOrgID), else on the event org as before; with deps.MemberJoinedEnabled it also keeps
+// the gift once per person per company (MemberJoinedGrantKey).
 func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, error) {
+	return buildCreditGrantHandler(deps, false)
+}
+
+// BuildMemberJoinedCreditGrantHandler (v0.3.0) returns the handler for org.member.added
+// (EventMemberJoined): PlanMemberJoinedGrant decides; the gift is the tier's sign-up grant, on the
+// person's workspace when the event names it, once per person per company (MemberJoinedGrantKey,
+// checked FAIL-CLOSED: an unreadable ledger is an error, so the delivery is retried, never a
+// second gift). Register it only for a company that opted in (auth_events.grant_on_member_joined).
+func BuildMemberJoinedCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, error) {
+	return buildCreditGrantHandler(deps, true)
+}
+
+func buildCreditGrantHandler(deps CreditGrantDeps, memberMode bool) (*IdempotentHandler, error) {
 	if deps.Config == nil {
 		return nil, errors.New("default credit-grant handler: Config required")
 	}
@@ -149,21 +233,39 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 			return errors.New("default credit-grant handler: expected authevents.Event")
 		}
 
-		userID := ev.GetUserID()
-		orgID := ev.GetOrgID()
-		if userID == "" {
-			hooks.OnSkipped("missing user_id", ev)
-			return hctx.Skip("missing user_id")
-		}
-
-		// org_id fallback: pin store
-		if orgID == "" {
-			if pinned, err := pinStore.Get(userID); err == nil && pinned != "" {
-				orgID = pinned
+		var userID, orgID, onceKey string
+		if memberMode {
+			// v0.3.0 — a person joined the company (any account, new or existing).
+			plan := PlanMemberJoinedGrant(ev, true)
+			if plan.Action != "grant" {
+				hooks.OnSkipped("member-joined gift: "+plan.Reason, ev)
+				return hctx.Skip(plan.Reason)
 			}
-		}
-		if orgID != "" {
-			_ = pinStore.Set(userID, orgID, "auto")
+			userID, orgID, onceKey = plan.UserID, plan.BillingOrgID, plan.OnceKey
+		} else {
+			userID = ev.GetUserID()
+			orgID = ev.GetOrgID()
+			if userID == "" {
+				hooks.OnSkipped("missing user_id", ev)
+				return hctx.Skip("missing user_id")
+			}
+			if deps.MemberJoinedEnabled && orgID != "" {
+				onceKey = MemberJoinedGrantKey(orgID, userID) // the company = the org the event names
+			}
+			// v0.3.0: auth names the person's own workspace — the account the company bills.
+			if ws := ev.GetWorkspaceOrgID(); ws != "" {
+				orgID = ws
+			}
+
+			// org_id fallback: pin store
+			if orgID == "" {
+				if pinned, err := pinStore.Get(userID); err == nil && pinned != "" {
+					orgID = pinned
+				}
+			}
+			if orgID != "" {
+				_ = pinStore.Set(userID, orgID, "auto")
+			}
 		}
 
 		// Tier — explicitly wired, no NameError fallback.
@@ -227,6 +329,21 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 				return hctx.Skip("source event already granted")
 			}
 		}
+		// v0.3.0: once per person per company — FAIL CLOSED (an unreadable ledger is an error, so the
+		// delivery is retried; nothing has been granted yet).
+		if onceKey != "" {
+			if hctx.Store == nil {
+				return errors.New("credit grant: no ledger store to keep the gift once per person")
+			}
+			done, err := hctx.Store.AlreadyDone(ctx, onceKey)
+			if err != nil {
+				return fmt.Errorf("once-per-person check: %w", err)
+			}
+			if done {
+				hooks.OnSkipped("already got this company's sign-up gift: "+onceKey, ev)
+				return hctx.Skip("already got this company's sign-up gift")
+			}
+		}
 
 		already, err := hctx.AlreadyDone(ctx)
 		if err != nil {
@@ -271,6 +388,14 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 			}); err != nil {
 				slog.Warn("mark source-event dedup failed", "key", eventKey, "err", err)
 			}
+			if onceKey != "" {
+				if err := hctx.Store.MarkDone(ctx, handlerledger.MarkDoneInput{
+					DedupKey: onceKey, SourceHandler: hctx.HandlerName, SourceEventID: ev.GetEventID(),
+					SideEffectID: req.IdempotencyKey,
+				}); err != nil {
+					slog.Warn("mark once-per-person key failed", "key", onceKey, "err", err)
+				}
+			}
 		}
 
 		hooks.OnGranted(req)
@@ -280,12 +405,27 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 		return hctx.Success(req.EventID)
 	}
 
+	name := "default_credit_grant"
+	if memberMode {
+		name = "member_joined_credit_grant"
+	}
 	wcfg := handlerledger.IdempotentConfig{
-		Handler:      "default_credit_grant",
+		Handler:      name,
 		Retry:        handlerledger.DefaultRetry(),
 		LeaseSeconds: 60,
 	}
 	return Idempotent(wcfg, inner), nil
+}
+
+// RegisterMemberJoinedCreditGrantHandler (v0.3.0) builds the member-joined handler and registers it
+// on EventMemberJoined. quota.Setup calls it only when auth_events.grant_on_member_joined is true.
+func RegisterMemberJoinedCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, error) {
+	h, err := BuildMemberJoinedCreditGrantHandler(deps)
+	if err != nil {
+		return nil, err
+	}
+	OnAuthEvent(EventMemberJoined, h)
+	return h, nil
 }
 
 // RegisterDefaultCreditGrantHandler builds + registers the default handler

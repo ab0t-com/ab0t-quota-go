@@ -412,6 +412,12 @@ func (m *Meter) resolvePrice(in ReserveInput) (rate, fee decimal.Decimal, meta m
 		if in.Variant != "" {
 			meta["variant"] = in.Variant
 		}
+		// v0.3.0: billing checks the event's rate against the price list THIS service published, keyed
+		// (metadata.service, product, variant) — the SNS lifecycle path carries no service header. Same
+		// key as the Python meter. Omitted for the "default" tool id (no published list to match).
+		if m.toolID != "" && m.toolID != "default" {
+			meta["service"] = m.toolID
+		}
 		return p.HourlyRate, p.AllocationFee, meta, p.FundingSources, nil
 	}
 	if in.HourlyRate.IsZero() {

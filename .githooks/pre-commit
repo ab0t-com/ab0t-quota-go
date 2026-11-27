@@ -2,17 +2,15 @@
 # pre-commit hook — scans staged changes for secrets before allowing
 # the commit. Installed via `scripts/install-hooks.sh`.
 #
-# This hook is intentionally lenient about gitleaks being missing: prints
-# a one-line warning and lets the commit proceed. The CI workflow scans
-# every PR regardless, so a missing local install isn't a foot-gun.
+# This hook IS the secret scan: there is no CI and no GitHub Actions workflow in this repo (owner rule —
+# workflows are not allowed; the scan runs locally, at no cost). So a missing gitleaks REFUSES the commit.
 
 set -e
 
 if ! command -v gitleaks >/dev/null 2>&1; then
-  printf '\033[33mwarning:\033[0m gitleaks not installed locally; secrets scan SKIPPED for this commit.\n'
-  printf '  Install: https://github.com/gitleaks/gitleaks#installing\n'
-  printf '  CI still scans on every push/PR.\n'
-  exit 0
+  printf '\033[31mERROR:\033[0m gitleaks is not installed — this hook is the only secret scan, so the commit is refused.\n'
+  printf '  Install: https://github.com/gitleaks/gitleaks#installing   (then commit again)\n'
+  exit 1
 fi
 
 # Stage-only scan — fast, only looks at what's about to be committed.

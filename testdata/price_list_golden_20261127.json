@@ -1,0 +1,66 @@
+{
+  "about": "Price list published to billing (0.8.0 / Go 0.3.0). Byte-identical copy in ab0t-quota/tests/ and ab0t-quota-go/testdata/. For each valid case: the canonical products JSON (keys sorted at every level, no whitespace, money as canonical strings) and its version = sha256 of those bytes. The canonical strings and hashes were written by hand and hashed with hashlib, independently of either implementation. Every invalid case must be refused (nothing published).",
+  "schema": "ab0t.price_list.v1",
+  "path": "/billing/price-list/{service_name}",
+  "valid": [
+    {
+      "name": "one_product_two_variants_mixed_number_and_string_prices",
+      "service_name": "acme-render",
+      "pricing": {"products": {"render_job": {"variants": {
+        "cpu": {"price_per_hour": 0.5, "allocation_price": 0, "default": true},
+        "gpu": {"price_per_hour": "3.000000", "allocation_price": "0.10"}}}}},
+      "canonical": "{\"render_job\":{\"variants\":{\"cpu\":{\"allocation_price\":\"0\",\"default\":true,\"price_per_hour\":\"0.5\"},\"gpu\":{\"allocation_price\":\"0.1\",\"default\":false,\"price_per_hour\":\"3\"}}}}",
+      "version": "sha256:13611c7dc04d6e0d6b44b13c06ab5b204a9ce062e7ba141150b30f012f596ee4"
+    },
+    {
+      "name": "same_prices_written_differently_give_the_same_version",
+      "service_name": "acme-render",
+      "pricing": {"products": {"render_job": {"variants": {
+        "gpu": {"allocation_price": 0.1, "price_per_hour": 3},
+        "cpu": {"default": true, "allocation_price": "0.000000", "price_per_hour": "0.500000"}}}}},
+      "canonical": "{\"render_job\":{\"variants\":{\"cpu\":{\"allocation_price\":\"0\",\"default\":true,\"price_per_hour\":\"0.5\"},\"gpu\":{\"allocation_price\":\"0.1\",\"default\":false,\"price_per_hour\":\"3\"}}}}",
+      "version": "sha256:13611c7dc04d6e0d6b44b13c06ab5b204a9ce062e7ba141150b30f012f596ee4"
+    },
+    {
+      "name": "two_products_funding_sources_micro_unit_and_integer_prices",
+      "service_name": "acme-render",
+      "pricing": {"products": {
+        "vm": {"variants": {
+          "small": {"price_per_hour": 12, "allocation_price": "0.25", "default": true},
+          "large": {"price_per_hour": 0.000001, "allocation_price": "0"}}},
+        "studio_render": {"funding_sources": ["balance"], "variants": {
+          "standard": {"price_per_hour": "1.50", "allocation_price": 2}}}}},
+      "canonical": "{\"studio_render\":{\"funding_sources\":[\"balance\"],\"variants\":{\"standard\":{\"allocation_price\":\"2\",\"default\":false,\"price_per_hour\":\"1.5\"}}},\"vm\":{\"variants\":{\"large\":{\"allocation_price\":\"0\",\"default\":false,\"price_per_hour\":\"0.000001\"},\"small\":{\"allocation_price\":\"0.25\",\"default\":true,\"price_per_hour\":\"12\"}}}}",
+      "version": "sha256:e5114e4800f7e51d4c03d31f15f5d1cf9757aff0b3f9dcdb9cf665b88eb0f02c"
+    }
+  ],
+  "invalid": [
+    {"name": "missing_allocation_price", "pricing": {"products": {"render_job": {"variants": {"cpu": {"price_per_hour": "0.5"}}}}}},
+    {"name": "seven_decimal_places", "pricing": {"products": {"render_job": {"variants": {"cpu": {"price_per_hour": "0.0000001", "allocation_price": "0"}}}}}},
+    {"name": "zero_hourly_rate", "pricing": {"products": {"render_job": {"variants": {"cpu": {"price_per_hour": "0", "allocation_price": "0"}}}}}},
+    {"name": "negative_allocation_price", "pricing": {"products": {"render_job": {"variants": {"cpu": {"price_per_hour": "1", "allocation_price": "-0.01"}}}}}},
+    {"name": "unknown_funding_bucket", "pricing": {"products": {"render_job": {"funding_sources": ["gold"], "variants": {"cpu": {"price_per_hour": "1", "allocation_price": "0"}}}}}},
+    {"name": "empty_funding_sources", "pricing": {"products": {"render_job": {"funding_sources": [], "variants": {"cpu": {"price_per_hour": "1", "allocation_price": "0"}}}}}},
+    {"name": "no_variants", "pricing": {"products": {"render_job": {"variants": {}}}}},
+    {"name": "price_is_not_a_number", "pricing": {"products": {"render_job": {"variants": {"cpu": {"price_per_hour": "cheap", "allocation_price": "0"}}}}}},
+    {"name": "hash_in_a_product_id", "pricing": {"products": {"render#job": {"variants": {"cpu": {"price_per_hour": "1", "allocation_price": "0"}}}}}},
+    {"name": "hash_in_a_variant_id", "pricing": {"products": {"render_job": {"variants": {"cpu#2": {"price_per_hour": "1", "allocation_price": "0"}}}}}}
+  ],
+  "max_variants": 500,
+  "http_outcomes": [
+    {"status": 200, "outcome": "published"},
+    {"status": 201, "outcome": "published"},
+    {"status": 204, "outcome": "published"},
+    {"status": 404, "outcome": "unsupported"},
+    {"status": 400, "outcome": "refused"},
+    {"status": 401, "outcome": "refused"},
+    {"status": 403, "outcome": "refused"},
+    {"status": 409, "outcome": "refused"},
+    {"status": 422, "outcome": "refused"},
+    {"status": 408, "outcome": "retry"},
+    {"status": 429, "outcome": "retry"},
+    {"status": 500, "outcome": "retry"},
+    {"status": 502, "outcome": "retry"},
+    {"status": 503, "outcome": "retry"}
+  ]
+}

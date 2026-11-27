@@ -33,12 +33,17 @@ Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 ## Install (pin a version)
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.1.12
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.1.12   # the CLI
+go get github.com/ab0t-com/ab0t-quota-go@v0.3.0
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.0   # the CLI
 ```
 
 Pre-1.0: read the [CHANGELOG](CHANGELOG.md) (and `migrations/` when present)
 before every bump.
+
+**Upgrading to v0.3.0:** a `quota-config.json` that omits `enforcement.enabled` now runs with quotas
+**enforced**, and a `credit_grant` that omits `reset_on_downgrade` now resets on a downgrade (the Python
+library's defaults; a warning names each omitted key). To keep the old behaviour, write both keys as
+`false`. Check your config first: `migrations/v0.2.0-to-v0.3.0/migrate-check.sh`.
 
 ## Minimal example
 
@@ -210,6 +215,12 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
   budget) ends as `failed_permanent` for that event id; re-posting the same
   event is a no-op. Fix the cause and re-send with `quotactl backfill` (new
   event ids; already-granted users are no-ops).
+- v0.3.0, opt-in: `"auth_events": {"grant_on_member_joined": true}` also grants the sign-up gift when a
+  person joins with an account they already have (auth's `org.member.added`), once per person per
+  company; subscribe the webhook to `org.member.added` too. The gift lands on the person's own
+  workspace when the event names it (`data.workspace_org_id`).
+- v0.3.0: `quota.Setup` sends your declared prices (`pricing.products`) to billing once per start, in a
+  goroutine (`Capabilities().PriceList`); opt out with `"billing_integration": {"price_list": false}`.
 
 ## Keeping usage correct (self-healing counters)
 
@@ -341,11 +352,12 @@ make scan-staged    # what the pre-commit hook runs
 ```
 
 The pre-commit hook scans only staged changes with `gitleaks protect
---staged` — fast, only your diff. CI runs a full-history scan on
-every push and PR (`.github/workflows/ci.yml`). Allowlist test
+--staged` — fast, only your diff — and `make scan` scans the whole
+tree (the release script runs it and blocks on any finding). There is
+no CI: the secret scan runs locally as a git hook, so gitleaks must be
+installed — without it the hook refuses the commit. Allowlist test
 fixtures in `.gitleaks.toml`; per-finding fingerprints go in
-`.gitleaksignore`. If gitleaks isn't installed locally the hook
-prints a warning and lets the commit through — CI still gates.
+`.gitleaksignore`.
 
 ## Status
 

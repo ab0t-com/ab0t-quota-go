@@ -1,0 +1,14 @@
+{
+  "service_name": "example-render",
+  "storage": {"redis_url": "memory://"},
+  "enforcement": {"enabled": true},
+  "tiers": [
+    {"tier_id": "free", "display_name": "Free",
+     "credit_grant": {"trigger": "signup", "amount_per_period": "5", "lifecycle": "persistent", "destination": "credit_balance",
+                      "reset_on_downgrade": true}}
+  ],
+  "pricing": {
+    "_comment": "quotago:v0.3.0-reviewed — these are the prices we charge; publishing them to billing is fine",
+    "products": {"render_job": {"variants": {"cpu": {"price_per_hour": "0.50", "allocation_price": "0"}}}}
+  }
+}

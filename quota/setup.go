@@ -216,7 +216,14 @@ type Capabilities struct {
 	// "v1", "v1+dual(phase=dual)", "v2(phase=reaped)" — so an operator can
 	// see which shape a live process reads/writes (keyspace spec §3).
 	Keyspace string
-	WhyOff   map[string]string
+	// PriceList (v0.3.0) is the price-list publish state: "publishing(<version>)" |
+	// "published(<version>[, after N retries])" | "retrying(attempt N)" | "unsupported(404: …)" |
+	// "refused(<status>)" | "off(<why>)" | "not_published(invalid pricing — see the log)". Updated by
+	// the background publisher; informational (not part of Healthy).
+	PriceList         string
+	PriceListAttempts int
+	PriceListFailures int
+	WhyOff            map[string]string
 	// ConfigWarnings (v0.1.10) are config.Config.Warnings(): shapes that boot but
 	// silently allow more than intended (enforcement off, a reset_period typo that
 	// never resets, a limit for a resource that does not exist, ...).
@@ -707,13 +714,17 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		granter = &billingCreditGranter{c: q.Billing}
 	}
 	if granter != nil {
-		h, err := authevents.RegisterDefaultCreditGrantHandler(authevents.CreditGrantDeps{
+		grantDeps := authevents.CreditGrantDeps{
 			Config:       cfg,
 			TierProvider: providerAdapter{prov},
 			PinStore:     q.PinStore,
 			Ledger:       q.LedgerStore,
 			Granter:      granter,
-		})
+			// v0.3.0: the company's opt-in — a person who joins with an account they already have
+			// (auth's org.member.added) also gets the sign-up gift, once per person per company.
+			MemberJoinedEnabled: cfg.AuthEvents.GrantOnMemberJoined,
+		}
+		h, err := authevents.RegisterDefaultCreditGrantHandler(grantDeps)
 		if err != nil {
 			return nil, fmt.Errorf("quota.Setup: credit grant handler: %w", err)
 		}
@@ -725,6 +736,18 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			authevents.UnregisterHandler("user.org_assigned", h)
 			return nil
 		})
+		if cfg.AuthEvents.GrantOnMemberJoined {
+			mh, err := authevents.RegisterMemberJoinedCreditGrantHandler(grantDeps)
+			if err != nil {
+				return nil, fmt.Errorf("quota.Setup: member-joined credit grant handler: %w", err)
+			}
+			q.closeFns = append(q.closeFns, func() error {
+				authevents.UnregisterHandler(authevents.EventMemberJoined, mh)
+				return nil
+			})
+			slog.Info("auth-event: member-joined sign-up gift ON (auth_events.grant_on_member_joined) — " +
+				authevents.EventMemberJoined + " gets the gift once per person; subscribe your webhook to it")
+		}
 		cap.CreditGrant = true
 	} else {
 		cap.WhyOff["credit_grant"] = "no CreditGranter supplied; default handler not registered"
@@ -839,12 +862,20 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			"usage into billing yet (limits and/or sign-up credit only), pass Options.EnablePaid=&false", err, paidWhy)
 	}
 
+	// v0.3.0 — the price list (pricing.products) for billing's rate check: decided here, published
+	// by a goroutine AFTER the capabilities are in place (Setup never waits for billing).
+	plBody, plService, plVersion, plState := preparePriceList(cfg, q.Billing != nil, enablePaid, opts.SkipBackgroundLoops)
+	cap.PriceList = plState
+
 	// v0.1.10 (ticket 20261016, C-08): the reconciler goroutine (started above) may
 	// already be writing q.capability under capMu — publish under the same lock.
 	q.capMu.Lock()
 	q.capability = cap
 	q.capMu.Unlock()
 	logCapabilities(cap)
+	if plBody != nil {
+		q.startPriceListPublisher(q.Billing, plService, plBody, plVersion)
+	}
 	return q, nil
 }
 

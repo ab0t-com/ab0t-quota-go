@@ -78,6 +78,12 @@ type EnforcementConfig struct {
 	// pre-v0.2.0 behaviour (the request proceeds unlimited). Leave it false wherever admitted work
 	// costs money.
 	AllowUnknownTier bool `json:"allow_unknown_tier,omitempty"`
+
+	// enabledUnset (v0.3.0) is true when LoadConfig read a config file with no enforcement.enabled key
+	// (or no enforcement block). Since v0.3.0 LoadConfig then sets Enabled = true (Python parity; it was
+	// false — every request allowed — before) and Warnings names it (EnforcementEnabledUnsetWarning).
+	// A Config built in Go code keeps the value it was given.
+	enabledUnset bool
 }
 
 // LegacyIncrementMode returns the effective legacy-increment policy (D-24),
@@ -154,6 +160,19 @@ type TierProviderConfig struct {
 type BillingIntegrationConfig struct {
 	PlanToTier        map[string]string `json:"plan_to_tier,omitempty"`
 	StripePriceToTier map[string]string `json:"stripe_price_to_tier,omitempty"`
+	// PriceList (v0.3.0) — publish pricing.products to billing at startup (quota.Setup). nil/true =
+	// on; only an explicit false turns it off. Same key as the Python library.
+	PriceList *bool `json:"price_list,omitempty"`
+}
+
+// PriceListEnabled reports billing_integration.price_list (default true).
+func (b BillingIntegrationConfig) PriceListEnabled() bool { return b.PriceList == nil || *b.PriceList }
+
+// AuthEventsConfig (v0.3.0) is the top-level "auth_events" block.
+type AuthEventsConfig struct {
+	// GrantOnMemberJoined — the company's opt-in: a person who joins with an account they already
+	// have (auth's org.member.added) also gets the sign-up gift, once per person. Default false.
+	GrantOnMemberJoined bool `json:"grant_on_member_joined,omitempty"`
 }
 
 // ReconciliationConfig: reserved for future use.

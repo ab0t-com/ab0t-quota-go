@@ -67,6 +67,13 @@ func LoadConfig(path string) (*Config, error) {
 
 	// Rebuild canonical JSON without `$` keys + decode into typed.
 	canonical, _ := json.Marshal(loose)
+	// v0.3.0: the new auth_events block is strict (a typo must never silently change who gets a
+	// sign-up gift) — checked before the typed decode so the error names the key.
+	if raw, ok := loose["auth_events"]; ok {
+		if err := ValidateAuthEventsBlock(raw); err != nil {
+			return nil, fmt.Errorf("config: %s: %w", path, err)
+		}
+	}
 	var cfg Config
 	if err := json.Unmarshal(canonical, &cfg); err != nil {
 		return nil, fmt.Errorf("config: %s decode: %w", path, err)
@@ -81,6 +88,9 @@ func LoadConfig(path string) (*Config, error) {
 			slog.Debug("config: unknown top-level key (preserved for forward-compat)", "key", k)
 		}
 	}
+	// v0.3.0: a key the FILE leaves unset gets the Python default — enforcement.enabled and each
+	// credit_grant.reset_on_downgrade become true — and Warnings names it.
+	markUnsetDefaults(&cfg, loose)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
@@ -128,5 +138,30 @@ func knownTopLevelKeys() map[string]bool {
 		"tier_provider": true, "storage": true, "alerts": true,
 		"enforcement": true, "billing_integration": true, "reconciliation": true,
 		"pricing": true, "bridge_cache": true,
+		"auth_events": true, // v0.3.0
 	}
+}
+
+// ValidateAuthEventsBlock (v0.3.0) checks the "auth_events" block the way the Python library does:
+// an object whose only key is grant_on_member_joined (a JSON boolean); `$…` / `_…` comment keys are
+// allowed.
+func ValidateAuthEventsBlock(raw json.RawMessage) error {
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &block); err != nil || block == nil {
+		return fmt.Errorf("auth_events: must be an object")
+	}
+	for k, v := range block {
+		if strings.HasPrefix(k, "$") || strings.HasPrefix(k, "_") {
+			continue
+		}
+		if k != "grant_on_member_joined" {
+			return fmt.Errorf("auth_events.%s: unknown key (a typo here would silently change who gets a "+
+				"sign-up gift). Allowed: grant_on_member_joined", k)
+		}
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil || strings.TrimSpace(string(v)) == "null" {
+			return fmt.Errorf("auth_events.grant_on_member_joined: expected true/false")
+		}
+	}
+	return nil
 }
