@@ -8,6 +8,7 @@ package outbox
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -17,9 +18,20 @@ import (
 // core is transport-agnostic; the consumer wires this. A nil publisher means
 // "no transport configured" → the event is fundamentally undeliverable and is
 // voided+alerted (never silently dropped).
+//
+// A Publish error normally means "not delivered now": the intent stays PENDING
+// and the drain retries it. An error wrapping ErrPublishRefused (v0.2.0) means
+// the transport answered and will NOT accept this event unchanged: the emitter
+// then takes the undeliverable path at once (a terminal event is settled
+// against billing, anything else is voided + alerted) instead of retrying it.
 type Publisher interface {
 	Publish(ctx context.Context, r Record) error
 }
+
+// ErrPublishRefused (v0.2.0, additive) marks a permanent refusal by the transport (e.g. billing's
+// HTTPS lifecycle intake answered a 4xx other than 408/429). Wrap it to send the event down the
+// settle-or-void path immediately. The SNS publisher never returns it.
+var ErrPublishRefused = errors.New("outbox: transport refused the event")
 
 // VoidEntry is an alert-mirror row for an explicitly voided (unsettleable) event.
 type VoidEntry struct {
@@ -83,6 +95,12 @@ func (e *Emitter) EmitViaOutbox(ctx context.Context, key string, r Record) (bool
 		return false, nil
 	}
 	if err := e.pub.Publish(ctx, r); err != nil {
+		if errors.Is(err, ErrPublishRefused) {
+			slog.Error("lifecycle_publish_REFUSED", "reservation_id", r.ReservationID, "event_type", r.EventType,
+				"err", err, "note", "the transport will not accept this event unchanged; settling it (terminal) or voiding + alerting")
+			e.settleOrVoid(ctx, r, "publish_refused")
+			return false, nil
+		}
 		_ = e.store.BumpAttempt(ctx, r.Key)
 		slog.Warn("lifecycle_outbox_pending", "reservation_id", r.ReservationID, "event_type", r.EventType,
 			"err", err, "note", "publish failed; durable intent retained for drain")
@@ -147,6 +165,10 @@ func (e *Emitter) Drain(ctx context.Context, maxPerPass int) (int, error) {
 			continue // nowhere to deliver yet; try next pass
 		}
 		if err := e.pub.Publish(ctx, r); err != nil {
+			if errors.Is(err, ErrPublishRefused) { // v0.2.0: a permanent refusal is not retried
+				e.settleOrVoid(ctx, r, "publish_refused")
+				continue
+			}
 			_ = e.store.BumpAttempt(ctx, r.Key)
 			continue
 		}

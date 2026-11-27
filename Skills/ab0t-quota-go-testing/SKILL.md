@@ -1,13 +1,14 @@
 ---
 name: ab0t-quota-go-testing
-description: Verify an ab0t-quota-go integration works end-to-end and troubleshoot when it doesn't. Use when wiring tests for a new integration, writing unit tests against `quota.Setup` / engine / middleware / handlers, generating signed webhook fixtures, smoke-testing in shadow mode, writing integration tests with httptest, mocking `CreditGranter` or `TierProvider`, inspecting the ledger after a run, debugging "webhook returns 401" / "credit not granted" / "every request gets 429 with tier_unresolved" / "handler runs twice" / "Setup says CreditGrant=false", or producing a test plan handed to QA before flipping enforcement on in prod.
+description: Verify an ab0t-quota-go integration works end-to-end and troubleshoot when it doesn't. Use when wiring tests for a new integration, writing unit tests against `quota.Setup` / engine / middleware / handlers, generating signed webhook fixtures, smoke-testing in shadow mode, writing integration tests with httptest, mocking `CreditGranter` or `TierProvider`, inspecting the ledger after a run, debugging "webhook returns 401" / "credit not granted" / "every request gets 503 with tier_unresolved" / "handler runs twice" / "Setup says CreditGrant=false", or producing a test plan handed to QA before flipping enforcement on in prod.
 ---
 
 # ab0t-quota-go Testing & Troubleshooting
 
 The library is built to be test-friendly: every external dependency
-is an interface, the default backends are in-memory, and the
-`Capabilities` snapshot tells you exactly what's wired. Use that.
+is an interface, a test can declare in-memory stores explicitly
+(`storage.redis_url: "memory://"`), and the `Capabilities` snapshot tells
+you exactly what's wired. Use that.
 
 ## Phase 1 — Verify it loaded at all
 
@@ -27,8 +28,8 @@ Expected: `Engine: true`. Required for any real test:
 | `Enforcement` | `true` for prod tests | `enforcement.enabled = false` in config |
 | `AuthEvents` | `true` | should always be true after Setup |
 | `CreditGrant` | `true` if testing money flow | you forgot to pass `CreditGranter` to Setup |
-| `Billing` | `true` for end-to-end | `AB0T_QUOTA_BILLING_URL` not set |
-| `LedgerBackend` | `"memory"` in v0.1.0 | stub note; v0.2 wires Redis/DDB |
+| `Billing` | `true` for end-to-end | `BILLING_SERVICE_URL` (or the deprecated `AB0T_QUOTA_BILLING_URL`) not set |
+| `LedgerBackend` | `"redis"` or `"ddb"` in prod | `"memory"` = not durable (only right for `memory://` dev/tests); if you configured `dynamodb_table`, read `WhyOff["ledger_persistent"]` |
 
 Programmatic version in a test:
 
@@ -42,12 +43,14 @@ require.True(t, caps.Enforcement)
 
 ## Phase 2 — Unit tests with no network
 
-Use `ConfigOverride` to skip disk + the in-memory stores (default in
-v0.1.0).
+Use `ConfigOverride` to skip disk, and declare the in-memory counter
+store explicitly — a config with no `Storage.RedisURL` refuses at Setup
+(QUOTA-CFG-001), in tests too.
 
 ```go
 func TestMyHandler_RespectsQuota(t *testing.T) {
     cfg := &config.Config{
+        Storage:     config.StorageConfig{RedisURL: config.Declare("memory://")},
         Enforcement: config.EnforcementConfig{Enabled: true},
         TierProvider: config.TierProviderConfig{
             Type:    "static",
@@ -268,11 +271,11 @@ Each row is "a way it breaks + a test that catches it":
 | HMAC mismatch | curl with bad sig → 401 | secret wiring symmetric |
 | Receiver delivery dedup race | 100 parallel POSTs of same event_id | handler runs ≤ 1 time |
 | `CreditGranter` returns transient error | inject error, expect retry | retry config respected |
-| `CreditGranter` returns permanent error | inject error N times, expect failed_permanent | ledger row visible via `quotactl events --status failed_permanent` |
+| `CreditGranter` returns permanent error | inject error N times, expect failed_permanent | ledger row visible via `q.LedgerStore.QueryByStatus(ctx, handlerledger.StatusFailedPermanent, handlerledger.QueryOptions{Limit: 50})` |
 | Tier provider returns empty | stub returns "" | handler returns Skip, no false denial |
 | Concurrent spend | 100 goroutines Spend(1) | final counter == 100 (race-safe) |
 | `shadow_mode` honored | over-limit request | 200 returned, log shows shadow_would_deny |
-| Missing env var | unset `AB0T_QUOTA_BILLING_URL` | Capabilities.Billing=false + WhyOff explains |
+| Missing env var | unset `BILLING_SERVICE_URL` (and the deprecated `AB0T_QUOTA_BILLING_URL`) | Capabilities.Billing=false + WhyOff explains |
 | Forward-compat config | add unknown top-level key | Setup succeeds; key in Extra map |
 
 The library's own test suite covers most of these — see
@@ -284,39 +287,44 @@ file.
 
 ### Ledger inspection
 
-```bash
-# Last 50 attempts for a specific user
-quotactl events --user u-alice --limit 50 | jq .
+The ledger lives in your service's Redis/DynamoDB, behind your service —
+query it in-process (e.g. from an admin route). The standalone
+`quotactl events` cannot reach it and refuses with a non-zero exit (v0.1.10+;
+v0.1.9 printed an empty result).
 
-# All permanent failures (needs human attention)
-quotactl events --status failed_permanent
+```go
+import "github.com/ab0t-com/ab0t-quota-go/handlerledger"
 
-# Currently in-progress (handlers running now)
-quotactl events --status in_progress
+// Last 50 attempts for a specific user
+rows, err := q.LedgerStore.QueryByUser(ctx, "u-alice", handlerledger.QueryOptions{Limit: 50})
+
+// All permanent failures (needs human attention)
+rows, err = q.LedgerStore.QueryByStatus(ctx, handlerledger.StatusFailedPermanent, handlerledger.QueryOptions{Limit: 50})
+
+// Currently in-progress (handlers running now)
+rows, err = q.LedgerStore.QueryByStatus(ctx, handlerledger.StatusInProgress, handlerledger.QueryOptions{Limit: 50})
 ```
-
-v0.1.0 caveat: the ledger is process-local (in-memory). The CLI hits
-its own empty store. Inspect via the service's admin RPC, or wait for
-v0.2 which wires Redis/DDB.
 
 ### Replay missed events
 
 ```bash
 quotactl replay \
   --file missed-events.jsonl \
-  --target https://your-svc/api/quotas/_webhooks/auth \
-  --secret "$AB0T_AUTH_WEBHOOK_SECRET"
+  --target https://your-svc/api/quotas/_webhooks/auth
+# the HMAC secret is read from AB0T_AUTH_WEBHOOK_SECRET (avoid --secret: argv is visible in ps)
 ```
 
 Safe because the receiver's delivery dedup short-circuits already-
-processed events.
+processed events. Replay re-posts the SAME event ids, so an event whose
+ledger row is already `failed_permanent` stays a no-op — to re-try a failed
+grant, use `backfill` (new event ids; business dedup keeps granted users
+no-ops).
 
 ### Backfill legacy users
 
 ```bash
 quotactl backfill --input legacy-users.csv \
-  --target https://your-svc/api/quotas/_webhooks/auth \
-  --secret "$AB0T_AUTH_WEBHOOK_SECRET" --dry-run
+  --target https://your-svc/api/quotas/_webhooks/auth --dry-run   # secret from AB0T_AUTH_WEBHOOK_SECRET
 # review, then run without --dry-run
 ```
 
@@ -324,7 +332,11 @@ Same dedup safety — already-credited users are no-ops.
 
 ## Troubleshooting by symptom
 
-### "Every request returns 429 with `reason: tier_unresolved`"
+### "Every request returns 503 with `reason: tier_unresolved`"
+
+(v0.2.0+: an unresolved tier fails closed with `503` `quota_service_unavailable`; before v0.2.0
+the request was admitted unlimited. `enforcement.allow_unknown_tier: true` restores the old
+behaviour — only where admitted work costs nothing.)
 
 → Identity callback returns no `user_id`/`org_id`. Check upstream auth
 middleware is setting the context value the callback reads. Test:
@@ -388,9 +400,12 @@ rejected silently. Walk the trail (see
 
 ### "Tests pass but prod fails differently"
 
-→ v0.1.0 uses in-memory stores. Process restarts wipe counters. If
-your prod test depends on cross-restart state, that's expected. Wait
-for v0.2 (Redis/DDB) or design tests to be self-contained.
+→ Tests usually declare `memory://` (per-process counters, wiped on
+restart); prod declares a real Redis, which Setup machine-checks
+(topology / eviction / scripting) and can refuse. Run
+`quotactl capabilities` and `quotactl doctor` against the prod config
+before go-live, and compare `LedgerBackend` / `FloatStore` with what your
+tests assumed.
 
 ## Acceptance checklist before flipping enforcement on
 

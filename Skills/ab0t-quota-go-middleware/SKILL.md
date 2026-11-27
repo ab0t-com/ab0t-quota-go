@@ -98,9 +98,11 @@ limit. Use this for friendly in-app banners.
 2. Does Router return empty `resourceKey`? → next handler, no headers
 3. Does Identity error? → `FailOpen ? next : 401`
 4. Does Engine error (unknown resource, lookup failed)? → `FailOpen ? next : 503`
-5. Decision = Deny? → 429 with denial body
-6. Decision = Warn/Critical? → next handler + warning header
-7. Otherwise → next handler + headers
+5. Decision = UnknownTier (tier unresolved)? → 503 `quota_service_unavailable` (v0.2.0+; `FailOpen`
+   does not change this — only `enforcement.allow_unknown_tier: true` admits it)
+6. Decision = Deny? → 429 with denial body
+7. Decision = Warn/Critical? → next handler + warning header
+8. Otherwise → next handler + headers
 
 ## fail-open vs fail-closed
 
@@ -163,6 +165,6 @@ The guard is a vanilla `func(http.Handler) http.Handler` — drop into:
 |---------|-------|
 | `panic: middleware.Guard: Identity required` | passed `nil` Identity in MiddlewareDeps |
 | no `X-Quota-*` headers on response | path is exempt, or Router returned `""` |
-| every request gets 429 with `reason=tier_unresolved` | Identity returns no user_id, or no tier resolved |
+| every request gets 503 with `reason=tier_unresolved` (v0.2.0+) | Identity returns no user_id, or no tier resolved (the tier provider failed) |
 | every request gets 429 with `reason=tier_not_in_config` | TierProvider returned an id not in `config.tiers[]` |
 | header says `X-Quota-Reason: shadow_would_deny` | `enforcement.shadow_mode=true` — fix config or accept it |

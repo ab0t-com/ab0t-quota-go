@@ -164,6 +164,9 @@ type TransportChecker interface {
 // (ab0t_quota/billing/lifecycle.py emit()). Absent values are omitted (billing reads an absent key
 // and a null the same way); stopped_at is always set.
 type LifecycleEvent struct {
+	// EventID (v0.2.0) is fixed when the event is built and rides every retry and drain of it, so
+	// billing's exactly-once intake applies to retries (the Python emitter's event_id).
+	EventID       string         `json:"event_id,omitempty"`
 	EventType     string         `json:"event_type"`
 	OrgID         string         `json:"org_id"`
 	UserID        string         `json:"user_id"`
@@ -205,7 +208,9 @@ func (s OutboxSink) Emit(ctx context.Context, ev LifecycleEvent) (bool, error) {
 // TransportConfigured implements TransportChecker.
 func (s OutboxSink) TransportConfigured() bool { return s.Emitter.HasPublisher() }
 
-// RunHook is a client policy hook; run is nil when the reservation is not running in this process.
+// RunHook is a client policy hook; run is nil when the reservation is not running in this process,
+// and for an org-level event (v0.2.0: billing.funds_low with trigger balance_threshold carries no
+// reservation — ev.IsOrgLevel() is true).
 type RunHook func(ctx context.Context, ev billing.FundsEvent, run *Run) error
 
 // Config builds a Meter. Billing and Sink are required.
@@ -254,15 +259,17 @@ type Meter struct {
 // New validates cfg and builds a Meter. Every missing dependency is an ErrConfig here.
 func New(cfg Config) (*Meter, error) {
 	if cfg.Billing == nil {
-		return nil, fmt.Errorf("%w: Billing is required (e.g. billing.New(mesh.FromEnv()) or q.Billing)", ErrConfig)
+		return nil, fmt.Errorf("%w: Billing is required (e.g. billing.New(mesh.Resolve()) or q.Billing)", ErrConfig)
 	}
 	if cfg.Sink == nil {
 		return nil, fmt.Errorf("%w: Sink is required (e.g. meter.OutboxSink{Emitter: q.Outbox})", ErrConfig)
 	}
 	if tc, ok := cfg.Sink.(TransportChecker); ok && !tc.TransportConfigured() && !cfg.AllowMissingTransport {
-		return nil, fmt.Errorf("%w: the sink has no transport (outbox.sns_topic_arn unset / no publisher): no heartbeat "+
-			"would reach billing, so the funded hold and funds events would never engage — configure the topic, or set "+
-			"AllowMissingTransport to accept settle-only metering knowingly", ErrConfig)
+		return nil, fmt.Errorf("%w: the sink has no transport (no publisher on the outbox emitter): no heartbeat "+
+			"would reach billing, so the funded hold and funds events would never engage — use quota.Setup with billing "+
+			"wired (it sends lifecycle events over HTTPS to billing, or SNS when outbox.sns_topic_arn is set), pass "+
+			"billing.NewLifecyclePublisher(client) to outbox.NewEmitter, or set AllowMissingTransport to accept "+
+			"settle-only metering knowingly", ErrConfig)
 	}
 	interval := cfg.HeartbeatInterval
 	switch {
@@ -323,7 +330,7 @@ type ReserveInput struct {
 	Variant       string
 	HourlyRate    decimal.Decimal
 	AllocationFee decimal.Decimal
-	// EstimatedCost: zero → AllocationFee + HourlyRate × HoldHours.
+	// EstimatedCost: zero → AllocationFee + HourlyRate × HoldHours, rounded ROUND_UP to 6 places.
 	EstimatedCost decimal.Decimal
 	// OperationType: "" → ResourceType.
 	OperationType string
@@ -332,6 +339,11 @@ type ReserveInput struct {
 	RequestID    string
 	InstanceType string
 	Metadata     map[string]any
+	// FundingSources (v0.2.0, optional) — which of billing's buckets may fund the hold
+	// (billing.FundingBalance / FundingSubscriptionCredit / FundingCreditBalance); nil = every bucket.
+	// Only with an explicit HourlyRate: with a Product it comes from
+	// pricing.products.<product>.funding_sources (declared once), and setting it here is an ErrConfig.
+	FundingSources []string
 }
 
 // RunState is the JSON-safe snapshot to store on your resource row (Resume / Heartbeat take it back).
@@ -378,30 +390,44 @@ type Run struct {
 	stopLoop          chan struct{}
 }
 
-func (m *Meter) resolvePrice(in ReserveInput) (rate, fee decimal.Decimal, meta map[string]any, err error) {
+func (m *Meter) resolvePrice(in ReserveInput) (rate, fee decimal.Decimal, meta map[string]any, funding []string, err error) {
 	meta = map[string]any{}
 	if in.Product != "" {
 		if !in.HourlyRate.IsZero() || !in.AllocationFee.IsZero() {
-			return rate, fee, nil, fmt.Errorf("%w: set Product OR HourlyRate/AllocationFee, not both — prices are "+
+			return rate, fee, nil, nil, fmt.Errorf("%w: set Product OR HourlyRate/AllocationFee, not both — prices are "+
 				"declared once in pricing.products", ErrConfig)
 		}
+		if in.FundingSources != nil {
+			return rate, fee, nil, nil, fmt.Errorf("%w: with a Product, funding sources are declared once in "+
+				"pricing.products.<product>.funding_sources — do not set ReserveInput.FundingSources", ErrConfig)
+		}
 		if m.prices == nil {
-			return rate, fee, nil, fmt.Errorf("%w: Product needs Config.Pricing (meter.ParsePricing(cfg.Pricing))", ErrConfig)
+			return rate, fee, nil, nil, fmt.Errorf("%w: Product needs Config.Pricing (meter.ParsePricing(cfg.Pricing))", ErrConfig)
 		}
 		p, err := m.prices.Lookup(strings.TrimSpace(in.Product), in.Variant)
 		if err != nil {
-			return rate, fee, nil, err
+			return rate, fee, nil, nil, err
 		}
 		meta["product"] = strings.TrimSpace(in.Product)
 		if in.Variant != "" {
 			meta["variant"] = in.Variant
 		}
-		return p.HourlyRate, p.AllocationFee, meta, nil
+		return p.HourlyRate, p.AllocationFee, meta, p.FundingSources, nil
 	}
 	if in.HourlyRate.IsZero() {
-		return rate, fee, nil, fmt.Errorf("%w: a price is required: Product (declared in pricing.products) or HourlyRate", ErrConfig)
+		return rate, fee, nil, nil, fmt.Errorf("%w: a price is required: Product (declared in pricing.products) or HourlyRate", ErrConfig)
 	}
-	return in.HourlyRate, in.AllocationFee, meta, nil
+	if err := billing.ValidateFundingSources(in.FundingSources); err != nil {
+		return rate, fee, nil, nil, fmt.Errorf("%w: %v", ErrConfig, err)
+	}
+	// v0.2.0: an explicit price is exact to 6 decimal places (the meter sends it on every event).
+	if _, err := billing.MoneyFromDecimal(in.HourlyRate); err != nil {
+		return rate, fee, nil, nil, fmt.Errorf("%w: HourlyRate: %v", ErrConfig, err)
+	}
+	if _, err := billing.MoneyFromDecimal(in.AllocationFee); err != nil {
+		return rate, fee, nil, nil, fmt.Errorf("%w: AllocationFee: %v", ErrConfig, err)
+	}
+	return in.HourlyRate, in.AllocationFee, meta, in.FundingSources, nil
 }
 
 func required(name, v string) (string, error) {
@@ -428,7 +454,7 @@ func (m *Meter) Reserve(ctx context.Context, in ReserveInput) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	rate, fee, priceMeta, err := m.resolvePrice(in)
+	rate, fee, priceMeta, funding, err := m.resolvePrice(in)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +474,12 @@ func (m *Meter) Reserve(ctx context.Context, in ReserveInput) (*Run, error) {
 	}
 	est := in.EstimatedCost
 	if est.IsZero() {
-		est = fee.Add(rate.Mul(m.hold))
+		// v0.2.0: the hold estimate is the meter's one COMPUTED amount — rounded ROUND_UP (away
+		// from zero, at most one micro-unit) to 6 places, the same rule as billing and the Python
+		// meter. shopspring's RoundUp keeps a value that already has <= 6 places as it is.
+		est = fee.Add(rate.Mul(m.hold)).RoundUp(billing.MoneyPlaces)
+	} else if _, err := billing.MoneyFromDecimal(est); err != nil {
+		return nil, fmt.Errorf("%w: EstimatedCost: %v", ErrConfig, err)
 	}
 	if est.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: EstimatedCost must be > 0", ErrConfig)
@@ -473,14 +504,15 @@ func (m *Meter) Reserve(ctx context.Context, in ReserveInput) (*Run, error) {
 		op = rtype
 	}
 	req := billing.ReserveRequest{
-		OrgID:         org,
-		UserID:        user,
-		ToolID:        m.toolID,
-		EstimatedCost: est,
-		SessionID:     res,
-		RequestID:     rid,
-		OperationType: op,
-		Metadata:      reqMeta,
+		OrgID:          org,
+		UserID:         user,
+		ToolID:         m.toolID,
+		EstimatedCost:  est,
+		SessionID:      res,
+		RequestID:      rid,
+		OperationType:  op,
+		Metadata:       reqMeta,
+		FundingSources: funding,
 	}
 	result, err := m.billing.ReserveFunds(ctx, org, req)
 	if err != nil && ctx.Err() == nil && billing.IsTransient(err) {
@@ -609,6 +641,9 @@ func (r *Run) event(eventType, reason string, stoppedAt time.Time) LifecycleEven
 		meta[k] = v
 	}
 	ev := LifecycleEvent{
+		// Deterministic for a one-shot event (start / stop / delete) of this reservation, fresh per
+		// heartbeat — the Python emitter's rule (billing.LifecycleEventID; shared golden).
+		EventID:       billing.LifecycleEventID(eventType, r.ReservationID),
 		EventType:     eventType,
 		OrgID:         r.OrgID,
 		UserID:        r.UserID,

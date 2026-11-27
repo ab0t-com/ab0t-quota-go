@@ -23,6 +23,9 @@ Your Go service uses it to:
 4. **Meter a running resource** (optional, v0.1.12) — `meter` reserves funds, sends priced
    heartbeats and the stop event through the outbox, and refunds a launch that never started;
    `billing.Client.ReserveFunds` / `GetBalance` for direct use; `meter/metertest.Fake` for tests.
+   v0.2.0: lifecycle events reach billing over HTTPS when no SNS topic is configured, products can
+   declare `funding_sources` once in `pricing.products`, and `Client.CommitReservationResult` is the
+   typed commit for callers that settle a reservation themselves.
 
 Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 `q.Healthy()` fails when a money-relevant part is missing.
@@ -159,6 +162,7 @@ The rules this example teaches:
 |---|---|---|
 | `429` | over the tier limit (also `tier_not_in_config`, `global_kill_switch`) | `{"detail","reason","resource","tier","used","limit","upgrade_url"}` |
 | `503` | the engine could not decide (Redis down, unknown `resource_key`) and `FailOpen` is false | `{"detail":"quota engine error"}` |
+| `503` | the tier could not be resolved (`reason: tier_unresolved`; v0.2.0+, whatever `FailOpen` says — opt out with `enforcement.allow_unknown_tier: true`) | `{"error":"quota_service_unavailable","detail","reason","resource"}` |
 | `401` | your `Identity` func returned an error | `{"detail":"identity required"}` |
 
 Allowed responses carry `X-Quota-Resource`, `X-Quota-Tier`, `X-Quota-Reason`,
@@ -180,14 +184,15 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
   "destination": "credit_balance", "lifecycle": "persistent", ...}`. Only
   `trigger: "signup"` grants on auth events (v0.1.10).
 - `BillingCreditGranter(nil)` uses the billing client `Setup` builds from
-  `AB0T_QUOTA_BILLING_URL` + `AB0T_QUOTA_BILLING_TOKEN` (needs
+  `BILLING_SERVICE_URL` + `BILLING_SERVICE_API_KEY` (the names `authsetup connect billing`
+  prints; needs
   `billing.write.transactions`). A `credit_balance`/`persistent` grant goes to
   `POST /billing/{org}/promotional-credit` (billing's gift caps apply); any
   other bucket or lifecycle to `POST /billing/{org}/apply-credit-grant`. The
   idempotency key is derived from the grant (`user:{user}:initial_credit:{tier}`
   by default), never from the delivery, so a retried or replayed event can never
   grant twice.
-- Setting `AB0T_QUOTA_BILLING_URL` also asserts paid mode, which refuses to start
+- Setting `BILLING_SERVICE_URL` also asserts paid mode, which refuses to start
   without the durable outbox. For credit grants only, pass `EnablePaid: &false`
   (as above) until you wire metering.
 - Mount the receiver at the path you register with auth. Since v0.1.10 it
@@ -306,9 +311,10 @@ Only these names are read; generic names other services use are ignored on purpo
 |---|---|
 | `QUOTA_CONFIG_PATH` | config file (else `./quota-config.json`, then `/etc/ab0t/quota-config.json`) |
 | `QUOTA_REDIS_URL` | counter store when `storage.redis_url` is empty; `${QUOTA_*}` refs in the config file expand from env |
-| `AB0T_QUOTA_BILLING_URL`, `AB0T_QUOTA_BILLING_TOKEN` | billing client; setting the URL asserts paid mode |
-| `AB0T_QUOTA_PAYMENT_URL`, `AB0T_QUOTA_PAYMENT_TOKEN` | payment client |
-| `AB0T_QUOTA_SERVICE_TOKEN` | fallback key for both of the above |
+| `BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY` | billing client (the names `authsetup connect billing` prints); setting the URL asserts paid mode |
+| `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_API_KEY` | payment client (the names `authsetup connect payment` prints) |
+| `AB0T_QUOTA_SERVICE_TOKEN` | shared last-fallback key for both of the above |
+| `AB0T_QUOTA_BILLING_URL` / `_TOKEN`, `AB0T_QUOTA_PAYMENT_URL` / `_TOKEN` | **deprecated** (v0.2.0) — still read when the names above are unset, with one deprecation warning per process |
 | `AB0T_AUTH_WEBHOOK_SECRET` | auth-event HMAC secret (unset = every event is refused with 401) |
 | `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` | also accepted during a secret rotation (comma-separated) |
 | `AB0T_AUTH_AUTH_URL`, `AB0T_AUTH_ADMIN_TOKEN`, `AB0T_AUTH_WEBHOOK_PUBLIC_URL` | `subscribe-events` / auto-subscribe |

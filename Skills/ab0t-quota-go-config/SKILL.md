@@ -198,14 +198,16 @@ Python + Go.
 }
 ```
 
-`shadow_mode` is honored by the Go port (Python lib ignores it — known
-upstream bug).
+`shadow_mode` is honored by both runtimes (a would-deny becomes
+`ShadowAllow` with reason `shadow_would_deny`). `global_kill_switch` is an
+emergency HALT, not an off switch: every check and acquire is DENIED — to
+stop enforcing, set `enabled: false`.
 
 ## storage — the declared counter store
 
 ```json
 "storage": {
-  "redis_key_prefix": "quota",        // only "quota" is accepted (cross-runtime keyspace parity, D-17) — any other value refuses at startup
+  "redis_key_prefix": "quota",        // only "quota" is accepted (cross-runtime keyspace parity) — any other value refuses at startup
   "redis_url": "redis://your-redis-host:6379/0",   // YOUR endpoint, declared — or "memory://" for single-process dev
   "dynamodb_table": "ab0t-quota-ledger",
   "dynamodb_region": "us-east-1"
@@ -224,13 +226,13 @@ Further `storage` keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `redis_password` | — | credential; a declared field beats a URL-embedded one (D-5(a); differing both logs a WARNING naming the winner) |
-| `connect_retry_seconds` | `30` | D-2: a DECLARED but unreachable Redis is retried for up to this many seconds at boot, then REFUSED with a typed reachability error (`0` = fail immediately). Auth failures never retry. It never silently degrades to in-memory |
-| `redis_cluster_confirmed_disabled` | `false` | operator assertion for an unprobeable topology (D-71); never overrides an observed `cluster_enabled:1` |
-| `redis_durability_confirmed` | `false` | operator assertion for unreadable `CONFIG` (D-72); never overrides an observed `allkeys-*` |
-| `ddb_pitr_confirmed` | `false` | operator assertion where the control plane cannot report PITR (D-76) |
-| `keyspace_version` | absent = `1` | counter key shape. **v1 is today's keys — an existing consumer changing nothing is unaffected.** `2` (service-scoped v2 shape) requires `service_name` and is currently REFUSED by `config.Validate`: the Go dual/v2 engine path is not wired yet, and declaring a shape nothing writes would be a lie. Stay `(1, false)` until the Go dual path lands |
-| `keyspace_dual_write` | `false` | maintain both shapes during a v1→v2 migration — same refusal status as `keyspace_version: 2` |
+| `redis_password` | — | credential; a declared field beats a URL-embedded one (differing both logs a WARNING naming the winner) |
+| `connect_retry_seconds` | `30` | a DECLARED but unreachable Redis is retried for up to this many seconds at boot, then REFUSED with a typed reachability error (`0` = fail immediately). Auth failures never retry. It never silently degrades to in-memory |
+| `redis_cluster_confirmed_disabled` | `false` | operator assertion for an unprobeable topology; never overrides an observed `cluster_enabled:1` |
+| `redis_durability_confirmed` | `false` | operator assertion for unreadable `CONFIG`; never overrides an observed `allkeys-*` |
+| `ddb_pitr_confirmed` | `false` | operator assertion where the control plane cannot report PITR |
+| `keyspace_version` | absent = `1` | counter key shape. **v1 is today's keys — an existing consumer changing nothing is unaffected.** `2` (service-scoped shape) requires `service_name`; boot guards refuse a version regression after a completed migration (QUOTA-CFG-011) and v2 over live v1 keys (QUOTA-CFG-012). Changing it is a migration — leave it absent unless you are running one |
+| `keyspace_dual_write` | `false` | maintain both shapes during a v1→v2 migration (also requires `service_name`) |
 
 Startup refusal codes are one registry shared byte-identically with the
 Python runtime (`conformance/quota-cfg-registry.json`); the Python repo's

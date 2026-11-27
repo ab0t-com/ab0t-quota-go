@@ -16,6 +16,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -27,6 +28,13 @@ import (
 	"github.com/ab0t-com/ab0t-quota-go/config"
 	"github.com/ab0t-com/ab0t-quota-go/counters"
 )
+
+// ErrTierUnresolved (v0.2.0) is wrapped by the error Acquire returns when the org's tier could not
+// be resolved (the tier provider failed or returned blank) and enforcement.allow_unknown_tier is
+// off: the limit could not be evaluated, so nothing was admitted or spent. Answer it like any
+// dependency failure (503 / retry later) — it is not "over the limit". Check reports the same
+// situation as an UnknownTier decision (Result.Unavailable()).
+var ErrTierUnresolved = errors.New("engine: tier unresolved — the quota limit could not be evaluated")
 
 // AcquireResult is the outcome of Acquire. ActivationID is the minted,
 // retry-safe handle the caller carries to Release/Settle.
@@ -59,7 +67,7 @@ func (e *Engine) activationStore() activations.Store {
 func (e *Engine) gaugeLimit(ctx context.Context, orgID, userID, rk string) (orgLimit, userLimit *float64, err error) {
 	tierID, terr := e.Provider.GetTier(ctx, userID, orgID)
 	if terr != nil || tierID == "" {
-		return nil, nil, nil // unresolved tier ⇒ treat as unlimited here; Check gates tiering
+		return nil, nil, nil // unresolved tier ⇒ no limit here; Check and Acquire gate it (fail closed unless allow_unknown_tier)
 	}
 	tier, ok := e.Reg.Tier(tierID)
 	if !ok {
@@ -114,7 +122,25 @@ func (e *Engine) Acquire(ctx context.Context, in AcquireInput) (AcquireResult, e
 	// already does; Acquire must agree — D-48 matrix). Not softened by shadow.
 	// Only when enforcement is enabled (enabled=false bypasses, like Check).
 	if e.Cfg == nil || e.Cfg.Enforcement.Enabled {
-		if tierID, terr := e.Provider.GetTier(ctx, in.UserID, in.OrgID); terr == nil && tierID != "" {
+		tierID, terr := e.Provider.GetTier(ctx, in.UserID, in.OrgID)
+		switch {
+		case terr != nil || tierID == "":
+			// v0.2.0: an UNRESOLVED tier (the provider failed or returned blank) fails CLOSED here
+			// too, like Check and the Python runtime's acquire (which propagates the provider's
+			// error). It used to fall through to gaugeLimit, which reads it as UNLIMITED — an
+			// admission nobody could bill. The limit could not be evaluated, so this is an error
+			// (ErrTierUnresolved; answer it 503), not a quota denial. The config opt-out
+			// enforcement.allow_unknown_tier keeps the old behaviour, loudly.
+			if e.Cfg == nil || !e.Cfg.Enforcement.AllowUnknownTier {
+				slog.Warn("acquire_denied", "org", in.OrgID, "bundle", label, "reason", "tier_unresolved", "error", terr)
+				if terr == nil {
+					terr = errors.New("the tier provider returned no tier")
+				}
+				return AcquireResult{}, fmt.Errorf("%w (org %s): %v", ErrTierUnresolved, in.OrgID, terr)
+			}
+			slog.Warn("tier_unresolved_admitted", "org", in.OrgID, "bundle", label, "gate", "acquire", "error", terr,
+				"note", "enforcement.allow_unknown_tier is on: admitted WITHOUT a limit")
+		default:
 			if _, ok := e.Reg.Tier(tierID); !ok {
 				e.emit(ctx, QuotaEvent{Kind: EventTierNotInConfig, OrgID: partitionOrg(in.UserID, in.OrgID), ResourceKey: label})
 				slog.Warn("acquire_denied", "org", in.OrgID, "bundle", label, "reason", "tier_not_in_config", "tier", tierID)

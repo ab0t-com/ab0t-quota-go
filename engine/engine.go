@@ -206,12 +206,15 @@ func (e *Engine) check(ctx context.Context, in CheckInput) (Result, error) {
 
 	tierID, err := e.Provider.GetTier(ctx, in.UserID, in.OrgID)
 	if err != nil || tierID == "" {
+		// v0.2.0: an unresolved tier does not proceed (Result.Allowed() is false) unless the config
+		// opts out with enforcement.allow_unknown_tier.
 		return Result{
-			Decision: UnknownTier,
-			Reason:   "tier_unresolved",
-			Resource: in.ResourceKey,
-			TierID:   tierID,
-			Message:  e.Messages.UnknownTier(messages.Vars{Tier: tierID}),
+			Decision:         UnknownTier,
+			Reason:           "tier_unresolved",
+			Resource:         in.ResourceKey,
+			TierID:           tierID,
+			Message:          e.Messages.UnknownTier(messages.Vars{Tier: tierID}),
+			AllowUnknownTier: e.Cfg != nil && e.Cfg.Enforcement.AllowUnknownTier,
 		}, nil
 	}
 

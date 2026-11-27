@@ -86,6 +86,26 @@ func WriteDenial(w http.ResponseWriter, r engine.Result) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// WriteUnavailable (v0.2.0) answers a result the engine could not evaluate (an UnknownTier
+// decision that does not proceed — Result.Unavailable()) with 503 and a static body:
+//
+//	{"error": "quota_service_unavailable", "detail": "Quota enforcement is temporarily unavailable.",
+//	 "reason": "tier_unresolved", "resource": "..."}
+//
+// (the Python middleware's 503 body, plus reason/resource). The X-Quota-* headers are written too.
+func WriteUnavailable(w http.ResponseWriter, r engine.Result) {
+	WriteHeaders(w, r)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	body := map[string]any{
+		"error":    "quota_service_unavailable",
+		"detail":   "Quota enforcement is temporarily unavailable.",
+		"reason":   r.Reason,
+		"resource": r.Resource,
+	}
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 // WriteWarn injects the warning copy into a response header without
 // affecting the status code. The caller decides whether to expose it in
 // the body too.

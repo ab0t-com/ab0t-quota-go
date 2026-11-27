@@ -9,12 +9,14 @@ package billing
 // No existing method changes.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
@@ -51,6 +53,44 @@ type ReserveRequest struct {
 	RequestID     string          `json:"request_id,omitempty"`
 	OperationType string          `json:"operation_type"`
 	Metadata      map[string]any  `json:"metadata"`
+	// FundingSources (v0.2.0, optional) limits which of the org's buckets may fund this hold —
+	// billing's own bucket names: FundingBalance, FundingSubscriptionCredit, FundingCreditBalance.
+	// nil = every bucket (billing's default; the field is not sent). A non-nil empty list or an
+	// unknown / repeated name is refused before sending. With the meter, declare it once per
+	// product in pricing.products.<product>.funding_sources instead.
+	FundingSources []string `json:"funding_sources,omitempty"`
+}
+
+// Billing's funding buckets (v0.2.0) — the names billing's reserve accepts in funding_sources.
+const (
+	FundingBalance            = "balance"
+	FundingSubscriptionCredit = "subscription_credit"
+	FundingCreditBalance      = "credit_balance"
+)
+
+// ValidateFundingSources (v0.2.0) checks a funding_sources list: nil is valid (every bucket); a
+// non-nil list must be non-empty and name each of billing's buckets at most once.
+func ValidateFundingSources(sources []string) error {
+	if sources == nil {
+		return nil
+	}
+	if len(sources) == 0 {
+		return errors.New("funding_sources is empty — that would let nothing fund the hold; omit it for every bucket")
+	}
+	seen := map[string]bool{}
+	for _, s := range sources {
+		switch s {
+		case FundingBalance, FundingSubscriptionCredit, FundingCreditBalance:
+		default:
+			return fmt.Errorf("funding_sources: %q is not a billing funding bucket (use %q, %q or %q)",
+				s, FundingBalance, FundingSubscriptionCredit, FundingCreditBalance)
+		}
+		if seen[s] {
+			return fmt.Errorf("funding_sources: %q is listed twice", s)
+		}
+		seen[s] = true
+	}
+	return nil
 }
 
 // ReserveResult is the typed answer. A nil money pointer means billing did not say (never 0).
@@ -64,6 +104,9 @@ type ReserveResult struct {
 	RequiredTopup    *decimal.Decimal
 	Reason           string
 	RequestID        string
+	// FundingSources (v0.2.0) is billing's echo of the funding_sources it applied to this hold; nil
+	// when billing did not echo one (every bucket, or an older billing that ignores the option).
+	FundingSources []string
 }
 
 // Reserved reports whether a hold exists.
@@ -74,6 +117,16 @@ type reserveResponse struct {
 	ReservedAmount   *decimal.Decimal `json:"reserved_amount"`
 	ExpiresAt        string           `json:"expires_at"`
 	AvailableBalance *decimal.Decimal `json:"available_balance"`
+	FundingSources   json.RawMessage  `json:"funding_sources"` // v0.2.0 echo; read leniently
+}
+
+// echoedFundingSources reads billing's funding_sources echo: a list of strings, else nil.
+func echoedFundingSources(raw json.RawMessage) []string {
+	var list []string
+	if len(raw) == 0 || json.Unmarshal(raw, &list) != nil {
+		return nil
+	}
+	return list
 }
 
 // ReserveFunds holds funds before provisioning. 402 → ReserveInsufficientFunds (with billing's
@@ -97,6 +150,9 @@ func (c *Client) ReserveFunds(ctx context.Context, orgID string, in ReserveReque
 	if in.EstimatedCost.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: ReserveFunds: estimated cost must be > 0", ErrInvalidRequest)
 	}
+	if err := ValidateFundingSources(in.FundingSources); err != nil {
+		return nil, fmt.Errorf("%w: ReserveFunds: %v", ErrInvalidRequest, err)
+	}
 	if in.ToolID == "" {
 		in.ToolID = "default"
 	}
@@ -116,11 +172,13 @@ func (c *Client) ReserveFunds(ctx context.Context, orgID string, in ReserveReque
 			if reason == "" {
 				reason = "insufficient_balance"
 			}
+			// v0.2.0: money read from the exact number text (a JSON number never goes through float64).
+			exact, _ := errorBodyExact(err)["detail"].(map[string]any)
 			return &ReserveResult{
 				Outcome:          ReserveInsufficientFunds,
-				AvailableBalance: decimalField(detail, "available_balance"),
-				RequestedAmount:  decimalField(detail, "requested_amount"),
-				RequiredTopup:    decimalField(detail, "required_topup"),
+				AvailableBalance: decimalField(exact, "available_balance"),
+				RequestedAmount:  decimalField(exact, "requested_amount"),
+				RequiredTopup:    decimalField(exact, "required_topup"),
 				Reason:           reason,
 				RequestID:        in.RequestID,
 			}, nil
@@ -143,6 +201,7 @@ func (c *Client) ReserveFunds(ctx context.Context, orgID string, in ReserveReque
 		ExpiresAt:        out.ExpiresAt,
 		AvailableBalance: out.AvailableBalance,
 		RequestID:        in.RequestID,
+		FundingSources:   echoedFundingSources(out.FundingSources),
 	}, nil
 }
 
@@ -267,7 +326,42 @@ func errorBody(err error) (int, map[string]any) {
 	return he.Status, m
 }
 
+// decodeExact decodes a JSON object keeping every number as json.Number — its exact text, never a
+// float64 (v0.2.0). Used ONLY to read money fields; the public Raw maps keep their earlier decoding.
+// Not an object / invalid → an empty map.
+func decodeExact(raw []byte) map[string]any {
+	m := map[string]any{}
+	if err := decodeOneExact(raw, &m); err != nil || m == nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+// decodeOneExact decodes exactly one JSON value (trailing data is an error, as with json.Unmarshal)
+// keeping numbers as json.Number.
+func decodeOneExact(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("invalid character after top-level value")
+	}
+	return nil
+}
+
+// errorBodyExact is errorBody's JSON body decoded with decodeExact (money fields only).
+func errorBodyExact(err error) map[string]any {
+	var he *httpx.Error
+	if !errors.As(err, &he) {
+		return map[string]any{}
+	}
+	return decodeExact([]byte(he.Body))
+}
+
 // decimalField reads a money value (JSON string or number) as a decimal; nil when absent/unparseable.
+// A json.Number (decodeExact) is read from its exact text; a float64 only from maps decoded without it.
 func decimalField(m map[string]any, key string) *decimal.Decimal {
 	v, ok := m[key]
 	if !ok || v == nil {

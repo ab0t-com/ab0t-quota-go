@@ -4,6 +4,8 @@
 package billing
 
 import (
+	"encoding/json"
+
 	"github.com/shopspring/decimal"
 )
 
@@ -34,10 +36,30 @@ type Usage struct {
 
 // QuotaCheckRequest is POST /billing/quota/check body.
 type QuotaCheckRequest struct {
-	UserID      string  `json:"user_id"`
-	OrgID       string  `json:"org_id"`
-	ResourceKey string  `json:"resource_key"`
-	Cost        float64 `json:"cost,omitempty"`
+	UserID      string `json:"user_id"`
+	OrgID       string `json:"org_id"`
+	ResourceKey string `json:"resource_key"`
+	// Cost is sent as a JSON number.
+	//
+	// Deprecated: a float64 cannot hold every amount exactly. Set CostExact instead (v0.2.0); when
+	// CostExact is set it is sent as an exact JSON string and Cost is ignored.
+	Cost float64 `json:"cost,omitempty"`
+	// CostExact (v0.2.0) is the exact cost, sent as a JSON string ("cost": "0.3"). nil → Cost is
+	// sent exactly as before.
+	CostExact *Money `json:"-"`
+}
+
+// MarshalJSON sends CostExact as an exact JSON string when it is set; otherwise the body is
+// byte-for-byte what earlier versions sent.
+func (r QuotaCheckRequest) MarshalJSON() ([]byte, error) {
+	type plain QuotaCheckRequest // same fields, no methods (no recursion)
+	if r.CostExact == nil {
+		return json.Marshal(plain(r))
+	}
+	return json.Marshal(struct {
+		plain
+		Cost string `json:"cost"` // the shallower field wins over plain.Cost
+	}{plain(r), r.CostExact.String()})
 }
 
 // QuotaCheckResponse is the typed response.

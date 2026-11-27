@@ -1,0 +1,6 @@
+groups:
+  - name: quota
+    rules:
+      - alert: QuotaTierUnresolved
+        # quotago:v0.2.0-reviewed — v0.2.0 answers an unresolved tier with 503
+        expr: 'sum(rate(http_requests_total{status="503",reason="tier_unresolved"}[5m])) > 0'

@@ -62,9 +62,11 @@ for the schema.
 
 | Var | Effect when set | Effect when missing |
 |-----|-----------------|---------------------|
-| `AB0T_QUOTA_BILLING_URL` | wires `q.Billing` typed client | `Capabilities.Billing=false`, `WhyOff["billing"]` says why |
-| `AB0T_QUOTA_PAYMENT_URL` | wires `q.Payment` typed client | `Capabilities.Payment=false` |
-| `AB0T_QUOTA_SERVICE_TOKEN` | bearer for mesh calls | unauthenticated mesh calls |
+| `BILLING_SERVICE_URL` (v0.2.0; printed by `authsetup connect billing`) | wires `q.Billing` typed client | `Capabilities.Billing=false`, `WhyOff["billing"]` says why |
+| `BILLING_SERVICE_API_KEY` | billing's `X-API-Key` | unauthenticated billing calls |
+| `PAYMENT_SERVICE_URL` / `PAYMENT_SERVICE_API_KEY` (printed by `authsetup connect payment`) | wires `q.Payment` typed client | `Capabilities.Payment=false` |
+| `AB0T_QUOTA_SERVICE_TOKEN` | shared last-fallback key for billing and payment | — |
+| `AB0T_QUOTA_BILLING_URL` / `_TOKEN`, `AB0T_QUOTA_PAYMENT_URL` / `_TOKEN` | **deprecated** fallbacks (read when the names above are unset; one deprecation warning per process) | — |
 | `AB0T_AUTH_WEBHOOK_SECRET` | HMAC for webhook receiver | receiver returns 401 to every event |
 | `AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS` | allow `metered_billing` / `one_time_purchase` tiers | config validation rejects them |
 

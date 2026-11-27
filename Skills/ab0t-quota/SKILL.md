@@ -95,9 +95,10 @@ That's the whole shape. Everything else is detail.
 
 | Var | Purpose |
 |-----|---------|
-| `AB0T_QUOTA_BILLING_URL` | typed billing client target |
-| `AB0T_QUOTA_PAYMENT_URL` | typed payment client target |
-| `AB0T_QUOTA_SERVICE_TOKEN` | mesh bearer token |
+| `BILLING_SERVICE_URL` / `BILLING_SERVICE_API_KEY` | typed billing client target + key (v0.2.0; what `authsetup connect billing` prints) |
+| `PAYMENT_SERVICE_URL` / `PAYMENT_SERVICE_API_KEY` | typed payment client target + key |
+| `AB0T_QUOTA_SERVICE_TOKEN` | shared last-fallback key for both |
+| `AB0T_QUOTA_BILLING_URL`, `AB0T_QUOTA_PAYMENT_URL`, `AB0T_QUOTA_BILLING_TOKEN`, `AB0T_QUOTA_PAYMENT_TOKEN` | deprecated fallbacks for the four canonical names |
 | `AB0T_AUTH_AUTH_URL` | auth service URL for auto-subscribe |
 | `AB0T_AUTH_ADMIN_TOKEN` | admin token for subscription POSTs |
 | `AB0T_AUTH_WEBHOOK_PUBLIC_URL` | your service's public URL |
@@ -119,8 +120,8 @@ caps := q.Capabilities()
 // caps.Billing, caps.Payment
 // caps.Alerts, caps.AlertsWebhook
 // caps.AuthEvents, caps.CreditGrant, caps.AutoSubscribe
-// caps.LedgerBackend (string: "memory" in v0.1.0)
-// caps.FloatStore   (string: "memory" in v0.1.0)
+// caps.LedgerBackend (string: "memory" | "redis" | "ddb")
+// caps.FloatStore   (string: "memory" | "redis"; "memory" only with an explicit "memory://")
 // caps.WhyOff       (map[string]string explaining each off subsystem)
 ```
 

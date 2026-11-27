@@ -1,0 +1,173 @@
+{
+  "description": "Lifecycle event-id contract shared by the Python (ab0t-quota) and Go (ab0t-quota-go) libraries; identical copies in both repositories. uuid5 hex = RFC 4122 v5 under the namespace below, name encoded UTF-8. one_shot: a start/stop/delete WITH a reservation id is deterministic 'evt_' + uuid5(ns, 'lifecycle:{reservation_id}:{event_type}'). fresh: a heartbeat, or no reservation id, is a new random 'evt_' + 32 hex each call. legacy: an outbox intent written without an event_id gets 'evt_' + uuid5(ns, '{key}:{emitted_at}') with an absent emitted_at read as the empty string - the same rule for every event type.",
+  "version": 1,
+  "namespace_url": "https://github.com/ab0t-com/ab0t-quota/lifecycle-event-id",
+  "namespace_uuid": "832691a0-b72c-5ebd-98e3-d39f381d2c7d",
+  "uuid5": [
+    {
+      "name": "",
+      "hex": "f78b8e5cddc0501bbdce9a4811ede4da"
+    },
+    {
+      "name": "a",
+      "hex": "36b747fc276d54a49ae757653306aeba"
+    },
+    {
+      "name": "res-1:resource.stopped:2026-11-23T07:00:00.000000Z",
+      "hex": "75a975c1680554a08fb8af157b1db21b"
+    },
+    {
+      "name": "lifecycle:res-1:resource.stopped",
+      "hex": "84ad4b5e357251e3b8ffb0933ccb2777"
+    },
+    {
+      "name": "r\u00e9s-\u00fc:resource.started:",
+      "hex": "f2135618ed8f582489d9e2ba08d3801a"
+    },
+    {
+      "name": "\ud83d\ude00",
+      "hex": "eeffb8d2a5725ae1ba5654825344bb78"
+    },
+    {
+      "name": "a:b:c::d",
+      "hex": "ab1706a7de4053fb8f9d1aaf51771dc9"
+    },
+    {
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "hex": "5e5dfc9732765e9bacfa72af2c3fcba4"
+    }
+  ],
+  "one_shot": [
+    {
+      "event_type": "resource.started",
+      "reservation_id": "res-1",
+      "event_id": "evt_51c53ac5bc83536aa5a4e28b5e0a3220"
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": "res-2",
+      "event_id": "evt_974c643c14085373826d396637a842f3"
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": " ",
+      "event_id": "evt_9689b94ceb3d562a8230ef82ef2b7131"
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": "r\u00e9s-\u00fc",
+      "event_id": "evt_6838d1497c6e5d1b96ffbb66b0c1ce9f"
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": "act_00000000000000000000000000000000",
+      "event_id": "evt_90412a26ccc7577ebee3a89c42137997"
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": "a:b",
+      "event_id": "evt_5f56ae06a7375f9b92dff59ee93baf63"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": "res-1",
+      "event_id": "evt_84ad4b5e357251e3b8ffb0933ccb2777"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": "res-2",
+      "event_id": "evt_1052f39a1c4d5ab6af1080c8eb72aa66"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": " ",
+      "event_id": "evt_78372bdc05aa59479995b7f0f0887d88"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": "r\u00e9s-\u00fc",
+      "event_id": "evt_745559dc2e765ed689e8ffcacdd39444"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": "act_00000000000000000000000000000000",
+      "event_id": "evt_1e12f0399e765501aa94f0fea0c55a60"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": "a:b",
+      "event_id": "evt_072ea576775c592a8eaef08939c80570"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": "res-1",
+      "event_id": "evt_e085cd38a2c55465b036bcdda709df12"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": "res-2",
+      "event_id": "evt_615422ffa80e52a1b94e4bf32a005089"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": " ",
+      "event_id": "evt_a884f79c03fc50739867c6948feacf90"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": "r\u00e9s-\u00fc",
+      "event_id": "evt_93759132127c5272b9edb7f38b707d84"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": "act_00000000000000000000000000000000",
+      "event_id": "evt_afdb6c7aad045cccbf449b29161586ca"
+    },
+    {
+      "event_type": "resource.deleted",
+      "reservation_id": "a:b",
+      "event_id": "evt_4f8c39d2269458c6a769ece1594e36da"
+    }
+  ],
+  "fresh": [
+    {
+      "event_type": "resource.heartbeat",
+      "reservation_id": "res-1"
+    },
+    {
+      "event_type": "resource.stopped",
+      "reservation_id": ""
+    },
+    {
+      "event_type": "resource.started",
+      "reservation_id": ""
+    }
+  ],
+  "legacy": [
+    {
+      "key": "res-1:resource.stopped",
+      "emitted_at": "2026-11-23T07:00:00.000000Z",
+      "event_id": "evt_75a975c1680554a08fb8af157b1db21b"
+    },
+    {
+      "key": "res-9:resource.heartbeat",
+      "emitted_at": "2026-11-20T00:00:00+00:00",
+      "event_id": "evt_a1689f25d051547a944854bbf396f49b"
+    },
+    {
+      "key": "res-1:resource.started",
+      "emitted_at": null,
+      "event_id": "evt_18d98af9384b5c9aac029500b365549f"
+    },
+    {
+      "key": "act_x:resource.stopped",
+      "emitted_at": "",
+      "event_id": "evt_6bfdd401faf056a48172f99c1ca1ab95"
+    },
+    {
+      "key": ":resource.stopped",
+      "emitted_at": "2026-11-23T07:00:00Z",
+      "event_id": "evt_ce7c3abe1fc458fb9377003866b265ed"
+    }
+  ]
+}

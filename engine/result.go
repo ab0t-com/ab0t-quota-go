@@ -13,7 +13,10 @@ const (
 	ShadowAllow Decision = "shadow_allow" // would have denied but shadow_mode=true
 	Warn        Decision = "warn"         // allowed; near threshold
 	Critical    Decision = "critical"     // allowed; at/over critical threshold
-	UnknownTier Decision = "unknown_tier" // resolver returned blank or unknown; fail-open by policy
+	// UnknownTier: the tier resolver failed or returned blank — the engine could not evaluate the
+	// limit. Since v0.2.0 it does NOT proceed (Allowed() is false; the middleware answers 503)
+	// unless the config opts out with enforcement.allow_unknown_tier = true.
+	UnknownTier Decision = "unknown_tier"
 )
 
 // Result captures everything middleware needs to write a response.
@@ -35,22 +38,38 @@ type Result struct {
 	// alert cooldowns and payloads are per tenant (ticket 20261016, C-11).
 	OrgID string
 
+	// AllowUnknownTier (v0.2.0) is the opt-out for an UnknownTier decision: Engine.Check copies it
+	// from the config's enforcement.allow_unknown_tier, so Allowed() lets an unresolved tier proceed
+	// the way it did before v0.2.0. False (the default) = an unresolved tier does not proceed.
+	AllowUnknownTier bool
+
 	// Debug captures structured diagnostics for log emission.
 	Debug map[string]any
 }
 
 // Allowed reports whether the result should let the request proceed.
-// Allow + ShadowAllow + Warn + Critical + UnknownTier all proceed; only
-// Deny stops.
-func (r Result) Allowed() bool { return r.Decision != Deny }
+// Allow + ShadowAllow + Warn + Critical proceed; Deny stops.
+//
+// v0.2.0 (changed default): UnknownTier stops too — the tier could not be resolved, so the limit
+// could not be evaluated, and admitting work then can cost money nobody can bill (fail closed; the
+// Python runtime's reading). A result carrying AllowUnknownTier (config
+// enforcement.allow_unknown_tier = true) keeps the pre-v0.2.0 behaviour: UnknownTier proceeds.
+func (r Result) Allowed() bool {
+	if r.Decision == UnknownTier {
+		return r.AllowUnknownTier
+	}
+	return r.Decision != Deny
+}
 
 // AllowedFailClosed (v0.1.12, additive, opt-in) is Allowed() with one difference: an
-// UnknownTier decision does NOT proceed. That is the Python runtime's reading (an unresolved tier is
-// a denial there), so a consumer guarding something that costs money can swap `res.Allowed()` for
-// `res.AllowedFailClosed()` and an auth/billing outage can no longer admit unlimited work. Allowed()
-// and the middleware keep today's behaviour; a future change to their default will be announced in
-// the CHANGELOG with a migration note.
+// UnknownTier decision never proceeds, whatever the config says. Since v0.2.0 Allowed() does the
+// same by default; AllowedFailClosed() stays for code that must fail closed even where the config
+// opts out (enforcement.allow_unknown_tier).
 func (r Result) AllowedFailClosed() bool { return r.Decision != Deny && r.Decision != UnknownTier }
+
+// Unavailable (v0.2.0) reports whether a refusal means "could not evaluate" rather than "over the
+// limit": an UnknownTier decision that does not proceed. The middleware answers it with 503, not 429.
+func (r Result) Unavailable() bool { return r.Decision == UnknownTier && !r.Allowed() }
 
 // IsUnlimited reports whether the result was for an unlimited resource.
 func (r Result) IsUnlimited() bool { return r.Limit == nil }

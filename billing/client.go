@@ -22,7 +22,7 @@ type Client struct {
 // a Capability=false (logged at Setup).
 func New(u mesh.URLs) (*Client, error) {
 	if u.Billing == "" {
-		return nil, errors.New("billing: AB0T_QUOTA_BILLING_URL not set")
+		return nil, errors.New("billing: " + mesh.EnvBillingServiceURL + " not set (deprecated name: " + mesh.EnvBillingURL + ")")
 	}
 	return &Client{http: httpx.New(u.Billing, u.BillingToken)}, nil
 }

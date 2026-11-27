@@ -50,8 +50,9 @@ func (p *MeshProvider) SetLookup(fn MeshLookup) { p.Lookup = fn }
 // The paired cache (WithCache) is what turns this into the safe behavior:
 // it serves last-known-good on failure and refuses to persist the fallback.
 // A MeshProvider used WITHOUT a cache simply surfaces the error to the engine,
-// which fail-opens (UnknownTier proceeds) rather than enforcing the invented
-// cheapest tier — still the safe direction for a paying customer.
+// which answers UnknownTier rather than enforcing the invented cheapest tier.
+// Since v0.2.0 UnknownTier fails closed (503, nothing admitted) unless the
+// config sets enforcement.allow_unknown_tier — pair the provider with a cache.
 func (p *MeshProvider) GetTier(ctx context.Context, userID, orgID string) (string, error) {
 	if p.Lookup == nil {
 		if p.DefaultTier != "" {

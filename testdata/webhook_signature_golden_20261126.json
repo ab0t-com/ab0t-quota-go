@@ -1,0 +1,587 @@
+{
+  "description": "Webhook signature contract shared by the Python (ab0t-quota) and Go (ab0t-quota-go) receivers; identical copies in both repositories. Standard Webhooks (the auth service's webhook-* headers): key = base64-decode(secret minus 'whsec_') when valid padded standard base64 (CR/LF ignored), else the secret's UTF-8 bytes; webhook-signature = space-separated 'v1,<base64 HMAC-SHA256(key, id.timestamp.body)>' tokens; webhook-timestamp = ASCII digits only (1-15); accept iff |now - timestamp| <= tolerance_seconds and any v1 token matches any configured non-empty secret. Order: timestamp syntax, tolerance, signature. 'now' is decimal seconds. Legacy X-Event-Signature: HMAC-SHA256(secret bytes, body) as 'sha256=<hex>' or '<hex>', hex case-insensitive, nothing else.",
+  "version": 1,
+  "tolerance_seconds": 300,
+  "standard_vectors": [
+    {
+      "note": "standardwebhooks.com spec example (auth contract vector)",
+      "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+      "timestamp": "1614265330",
+      "body": "{\"test\": 2432232314}",
+      "secret": "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+      "signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+    },
+    {
+      "note": "auth-generated secret whsec_ + 64 hex (valid base64 -> decoded) (auth contract vector)",
+      "id": "evt_00000000000000000000000000000001",
+      "timestamp": "1795140000",
+      "body": "{\"data\":{\"org_id\":\"org-golden\",\"user_id\":\"user-golden\"},\"event_id\":\"evt_00000000000000000000000000000001\"}",
+      "secret": "whsec_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "signature": "v1,Fu4rS2REWWJhqV/h0dCaouR1ud+g07MQobOwts8lazA="
+    },
+    {
+      "note": "self-chosen non-base64 secret -> raw bytes (auth contract vector)",
+      "id": "evt_00000000000000000000000000000001",
+      "timestamp": "1795140000",
+      "body": "{\"data\":{\"org_id\":\"org-golden\",\"user_id\":\"user-golden\"},\"event_id\":\"evt_00000000000000000000000000000001\"}",
+      "secret": "uj2001-a-0123456789abcdef",
+      "signature": "v1,BcmdXJz85F/jMRGr5Y3TPzAl3gRtBOH/DdPXKSbtAds="
+    },
+    {
+      "note": "key edge: 'whsec_' with an empty body -> empty key",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "whsec_",
+      "signature": "v1,ZlAx+6uJSOquBzKl+BsA4hxYPfHbCYUdlZFOvh09pRw="
+    },
+    {
+      "note": "key edge: 'whsec_abc' is not valid base64 -> the whole secret's bytes",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "whsec_abc",
+      "signature": "v1,2XvC5t6wffj1eTPbUGx4cLgWnM02G4gmvUX5DL0HCUQ="
+    },
+    {
+      "note": "key edge: CR/LF inside the base64 are ignored",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "whsec_YWJj\r\nZGVm",
+      "signature": "v1,T2hAZAzJuZ2qM567fqMBcbhs6KWr/gDxiso1nbT3Amo="
+    },
+    {
+      "note": "key edge: no prefix but valid base64 -> decoded (auth's rule)",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "YWJjZGVm",
+      "signature": "v1,T2hAZAzJuZ2qM567fqMBcbhs6KWr/gDxiso1nbT3Amo="
+    },
+    {
+      "note": "key edge: unpadded base64 is not valid -> raw bytes",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "whsec_YWJjZA",
+      "signature": "v1,edPXeo+2lgnOIHL0ILL52cBSz3cR/AnoMsGMIuT9Vvo="
+    },
+    {
+      "note": "key edge: non-ASCII secret -> UTF-8 bytes",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "secret": "s\u00e9cret-\u00fc",
+      "signature": "v1,AtDqYoZHuDA6tR6iehJE7XQbD+25NxvVwz8n2PtuKhE="
+    }
+  ],
+  "verify": [
+    {
+      "note": "tolerance: now == ts",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "tolerance: now = ts + 300 s (exactly the edge)",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140300",
+      "expect": "ok"
+    },
+    {
+      "note": "tolerance: now = ts - 300 s (ts in the future, exactly the edge)",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795139700",
+      "expect": "ok"
+    },
+    {
+      "note": "tolerance: now = ts + 300.5 s",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140300.5",
+      "expect": "timestamp_out_of_tolerance"
+    },
+    {
+      "note": "tolerance: now = ts - 299.5 s",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795139700.5",
+      "expect": "ok"
+    },
+    {
+      "note": "tolerance: now = ts - 300.5 s (future beyond the edge)",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795139699.5",
+      "expect": "timestamp_out_of_tolerance"
+    },
+    {
+      "note": "tolerance: just inside",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140299.999999",
+      "expect": "ok"
+    },
+    {
+      "note": "tolerance: a day-old replay",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795226400",
+      "expect": "timestamp_out_of_tolerance"
+    },
+    {
+      "note": "timestamp syntax: empty",
+      "id": "evt_edge",
+      "timestamp": "",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: leading space",
+      "id": "evt_edge",
+      "timestamp": " 1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: plus sign",
+      "id": "evt_edge",
+      "timestamp": "+1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: negative",
+      "id": "evt_edge",
+      "timestamp": "-1",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: fraction",
+      "id": "evt_edge",
+      "timestamp": "1795140000.0",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: non-ASCII digits",
+      "id": "evt_edge",
+      "timestamp": "\u0661\u0667\u0669\u0665",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: 20 digits",
+      "id": "evt_edge",
+      "timestamp": "99999999999999999999",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: exponent",
+      "id": "evt_edge",
+      "timestamp": "1e9",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "malformed_timestamp"
+    },
+    {
+      "note": "timestamp syntax: leading zeros are digits (signed over the same text)",
+      "id": "evt_edge",
+      "timestamp": "01795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,niKgDEBuHP+1nY/Ap26VHkXHwlDmkRMrwpwkcCNxnK4=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "rotation: only the new secret configured, signed by old",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "rotation: new + previous configured",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw",
+        "whsec_b2xkLXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "rotation: only the old configured",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "whsec_b2xkLXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "rotation: an empty entry is skipped",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "",
+        "whsec_b2xkLXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "rotation: no secret",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "rotation: only an empty secret",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        ""
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "rotation: an unrelated secret",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "intruder"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "rotation: auth's dual header, receiver has only the new",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw= v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "rotation: auth's dual header, receiver has only the old",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw= v1,vA8XB2nMZZ9qLO0HCCt95Yv8nqJ5NHGfXxXlIc1Iv90=",
+      "secrets": [
+        "whsec_b2xkLXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "header: an unknown version token first",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v2,AAAA v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "header: tab-separated",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,AAAA\tv1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "header: surrounding spaces",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "   v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=   ",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "ok"
+    },
+    {
+      "note": "header: uppercase version",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "V1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "header: empty signature",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "header: trailing junk on the token",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=,extra",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "header: empty header",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "header: no version prefix",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "header: space instead of comma",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1 +Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "body: one byte changed",
+      "id": "evt_edge",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edgE\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    },
+    {
+      "note": "id: a different webhook-id",
+      "id": "evt_other",
+      "timestamp": "1795140000",
+      "body": "{\"event_type\":\"org.created\",\"event_id\":\"evt_edge\"}",
+      "header": "v1,+Cit0XNa/UFiK5aBb5ll0Sy4eogha/UI5SybCtHO3aw=",
+      "secrets": [
+        "whsec_bmV3LXNlY3JldC0wMDAwMDAwMDAwMDAwMDAw"
+      ],
+      "now": "1795140000",
+      "expect": "signature_mismatch"
+    }
+  ],
+  "legacy": {
+    "body": "{\"event_type\":\"org.created\",\"org_id\":\"org-1\"}",
+    "secret": "s3cr3t",
+    "empty_secret_never_verifies": true,
+    "cases": [
+      {
+        "note": "sha256= prefix (canonical)",
+        "signature": "sha256=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": true
+      },
+      {
+        "note": "bare hex (CLI --bare)",
+        "signature": "101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": true
+      },
+      {
+        "note": "UPPERCASE hex (hex is case-insensitive)",
+        "signature": "101B6D2763DB4C229F6491EABCE674EFA194082573AC5D1F624565FA76602A53",
+        "valid": true
+      },
+      {
+        "note": "sha256= + UPPERCASE hex",
+        "signature": "sha256=101B6D2763DB4C229F6491EABCE674EFA194082573AC5D1F624565FA76602A53",
+        "valid": true
+      },
+      {
+        "note": "another algorithm label",
+        "signature": "sha1=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": false
+      },
+      {
+        "note": "another algorithm label",
+        "signature": "md5=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": false
+      },
+      {
+        "note": "uppercase label",
+        "signature": "SHA256=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": false
+      },
+      {
+        "note": "leading space",
+        "signature": " sha256=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a53",
+        "valid": false
+      },
+      {
+        "note": "empty",
+        "signature": "",
+        "valid": false
+      },
+      {
+        "note": "truncated",
+        "signature": "sha256=101b6d2763db4c229f6491eabce674efa194082573ac5d1f624565fa76602a",
+        "valid": false
+      },
+      {
+        "note": "wrong secret",
+        "signature": "sha256=e4a22fb5c17a29b2d5febfa73f1b70c973162fd260db4c1d614a014289dc9dda",
+        "valid": false
+      }
+    ]
+  }
+}

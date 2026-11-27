@@ -182,7 +182,8 @@ again, and you'd be in a retry loop with no observability.
 Instead: receiver returns 200 always (on valid signature). Handler
 errors are captured in the ledger and retried INSIDE the library
 with the configured `Retry` policy. After N failures, the row lands
-in `failed_permanent` and `quotactl events --status failed_permanent`
+in `failed_permanent` and `q.LedgerStore.QueryByStatus(ctx, handlerledger.StatusFailedPermanent, …)`
+(in-process — the standalone `quotactl events` cannot reach your ledger)
 surfaces it for human attention.
 
 Exception: 401 (bad signature) and 400 (malformed JSON) are returned

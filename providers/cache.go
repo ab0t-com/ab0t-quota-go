@@ -186,7 +186,8 @@ func (c *Cache) GetTier(ctx context.Context, userID, orgID string) (string, erro
 			return tier, nil
 		}
 		// No default and no history → genuinely unresolved. Propagate; the
-		// engine treats UnknownTier as fail-open (proceeds), never a downgrade.
+		// engine answers UnknownTier — never a downgrade. Since v0.2.0 that does
+		// not proceed (503) unless enforcement.allow_unknown_tier is set.
 		return tier, err
 	}
 

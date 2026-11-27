@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ab0t-com/ab0t-quota-go/handlerledger"
 )
@@ -39,6 +40,13 @@ type ReceiverConfig struct {
 	// MaxBodyBytes (v0.1.10) caps the body buffered before signature
 	// verification. 0 → DefaultMaxBodyBytes. Larger bodies get 413.
 	MaxBodyBytes int64
+	// StandardTolerance (v0.2.0) is the accepted |now − webhook-timestamp| for a delivery that carries
+	// the Standard Webhooks headers (webhook-id / -timestamp / -signature; see VerifyStandardWebhook).
+	// When any of them is present all must be present and verify, else 401 — even if
+	// X-Event-Signature is valid (a present-but-stale timestamp is a replay). 0 → 5 minutes.
+	StandardTolerance time.Duration
+	// Now (v0.2.0) is the clock of that check; nil → time.Now.
+	Now func() time.Time
 }
 
 // MakeRouter returns an http.Handler implementing the webhook receiver.
@@ -77,6 +85,14 @@ func MakeRouter(cfg ReceiverConfig) http.Handler {
 	if maxBody <= 0 {
 		maxBody = DefaultMaxBodyBytes
 	}
+	tolerance := cfg.StandardTolerance
+	if tolerance <= 0 {
+		tolerance = DefaultStandardTolerance
+	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
 	secrets := make([]string, 0, 1+len(cfg.PreviousSecrets))
 	secrets = append(secrets, cfg.Secret)
 	for _, s := range cfg.PreviousSecrets {
@@ -106,16 +122,34 @@ func MakeRouter(cfg ReceiverConfig) http.Handler {
 			return
 		}
 
-		sig := r.Header.Get("X-Event-Signature")
-		if sig == "" {
-			// legacy publisher
-			sig = r.Header.Get("X-Webhook-Signature")
-		}
 		verified := false
-		for _, s := range secrets {
-			if VerifyHMAC(body, sig, s) {
-				verified = true
-				break
+		// v0.2.0: Standard Webhooks headers present → they must ALL be present and verify (timestamp
+		// within the tolerance, any configured secret) — even when X-Event-Signature is valid, since a
+		// present-but-stale timestamp is exactly a replay. None present → X-Event-Signature decides.
+		stdID, hasID := r.Header[http.CanonicalHeaderKey(StandardHeaderID)]
+		stdTS, hasTS := r.Header[http.CanonicalHeaderKey(StandardHeaderTimestamp)]
+		stdSig, hasSig := r.Header[http.CanonicalHeaderKey(StandardHeaderSignature)]
+		if hasID || hasTS || hasSig {
+			reason := "missing_standard_header"
+			if hasID && hasTS && hasSig {
+				reason = VerifyStandardWebhook(body, stdID[0], stdTS[0], strings.Join(stdSig, " "),
+					secrets, now(), tolerance)
+			}
+			if reason != "" {
+				slog.Warn("auth-event webhook refused (Standard Webhooks)", "reason", reason)
+			}
+			verified = reason == ""
+		} else {
+			sig := r.Header.Get("X-Event-Signature")
+			if sig == "" {
+				// legacy publisher
+				sig = r.Header.Get("X-Webhook-Signature")
+			}
+			for _, s := range secrets {
+				if VerifyHMAC(body, sig, s) {
+					verified = true
+					break
+				}
 			}
 		}
 		if !verified {

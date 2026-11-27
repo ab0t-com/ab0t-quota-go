@@ -3,6 +3,163 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.2.0] — 2026-11-27
+
+**A MINOR: one default changed (an unresolved tier now fails closed), and two behaviours you could
+notice changed with it (lifecycle events can go over HTTPS; new env-var names).** No exported symbol
+was removed or renamed and no signature changed — your code compiles unchanged. Read
+**Migrating from 0.1.12** below; a read-only checker and a copy-paste notice for your team are in
+[`migrations/v0.1.12-to-v0.2.0/`](migrations/v0.1.12-to-v0.2.0/MIGRATION.md). Same contract as the
+Python `ab0t-quota`.
+
+### Migrating from 0.1.12
+
+| # | What | 0.1.12 | 0.2.0 | Your action |
+|---|---|---|---|---|
+| M1 | ⚠ **An unresolved tier** (the tier provider failed or returned blank → `engine.UnknownTier`, reason `tier_unresolved`) | `Result.Allowed()` true; the middleware let the request through, **unlimited**; `Engine.Acquire` admitted, unlimited | `Result.Allowed()` false; the middleware answers **`503`** `{"error":"quota_service_unavailable",…}` and does not call your handler; `Engine.Acquire` returns an error wrapping `engine.ErrTierUnresolved` (nothing admitted or spent). `GuardConfig.FailOpen` does not change this (it still covers engine errors only) | Nothing, if your tier provider resolves (a `default_tier`, or a provider with a cache). To keep the old behaviour knowingly — only where admitted work costs nothing — set `"enforcement": {"allow_unknown_tier": true}` in `quota-config.json`. Code that checks `res.Decision == engine.UnknownTier` itself is unaffected |
+| M2 | **Lifecycle transport** when billing is wired, the outbox is durable and `outbox.sns_topic_arn` is **not** set | paid mode refused to start (`no settlement publisher wired`) | starts: lifecycle events go to billing over HTTPS (`POST /billing/{org}/lifecycle-events`, your billing key), through the same durable outbox | Nothing. SNS stays when `outbox.sns_topic_arn` is set; a publisher you pass in `Options.SettlementPublisher` is used as before. `Capabilities().Resolved["lifecycle_transport"]` says which |
+| M4 | **Money is exact** (no float64 amounts) | `billing.QuotaCheckRequest.Cost` was the only float64 money field; JSON-number money in billing answers / funds events was read through float64; prices in `pricing.products` and explicit meter prices took any precision; the meter's hold estimate was unrounded | new `billing.Money` (exact micro-units, JSON string). `QuotaCheckRequest.CostExact` sent as a string (`Cost` deprecated, unchanged on the wire). Money in billing answers and funds events is read from the number's exact text. Prices with **more than 6 decimal places** are refused (`meter.ParsePricing`, explicit `ReserveInput` prices); computed amounts (the hold estimate, `CostForDuration`) **round UP to 6 places** — away from zero, at most one micro-unit — the same rule billing uses | Write prices with at most 6 decimal places. Set `CostExact` instead of `Cost` if you use `CheckQuota`. Everything else: nothing |
+| M3 | **Env-var names** for billing/payment | `AB0T_QUOTA_BILLING_URL`, `AB0T_QUOTA_BILLING_TOKEN`, `AB0T_QUOTA_PAYMENT_URL`, `AB0T_QUOTA_PAYMENT_TOKEN` | canonical: `BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY`, `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_API_KEY` (what `authsetup connect billing` / `connect payment` print). The old names still work when the new ones are unset; each old name in use is reported once per process. `AB0T_QUOTA_SERVICE_TOKEN` stays the shared last fallback for both keys (not deprecated) | Rename when convenient. If both are set, the **canonical name wins** (a different value under the old name is named in the warning) |
+
+### Changed
+
+- ⚠ **`engine.Result.Allowed()` and the middleware fail closed on an unresolved tier** (M1). Admitting
+  work while the tier cannot be resolved (an auth or billing outage) could cost money nobody can bill.
+  New opt-out: `config.EnforcementConfig.AllowUnknownTier` (`enforcement.allow_unknown_tier`), copied by
+  `Engine.Check` onto the new `engine.Result.AllowUnknownTier`. New `engine.Result.Unavailable()` (an
+  `UnknownTier` that does not proceed) and `middleware.WriteUnavailable` (the `503` body).
+  `Result.AllowedFailClosed()` is unchanged (it refuses an unresolved tier even with the opt-out).
+  ⚠ **`engine.Engine.Acquire` fails closed on an unresolved tier too** (like the Python runtime's
+  `acquire`): when the tier provider fails or returns blank it returns an error wrapping the new
+  `engine.ErrTierUnresolved` — nothing admitted, nothing spent; answer it as a dependency failure
+  (503 / retry later), not "over the limit". In 0.1.12 Acquire read an unresolved tier as UNLIMITED
+  and admitted. The same opt-out (`enforcement.allow_unknown_tier`) keeps the old behaviour, with a
+  `tier_unresolved_admitted` warning each time. A static tier provider keyed by user (`Mapping`) with
+  no `DefaultTier` resolves NO tier for an org-only Acquire (`UserID` empty) — give it a `DefaultTier`.
+- **`quota.Setup` wires an HTTPS lifecycle transport** when billing is wired and no SNS topic or publisher
+  is configured (M2). 408 / 429 / 5xx / no answer: retried in-call (0.5 s, then 1 s), then kept PENDING
+  in the durable outbox for the drain; past the retry horizon a terminal event is settled against
+  billing, any other is voided with an alert — exactly as with SNS. Any other 4xx, or a 2xx without
+  `accepted: true`, is a refusal: the event takes that settle-or-void path at once (void reason
+  `publish_refused`) instead of being retried unchanged. Nothing is dropped silently.
+- **Every meter lifecycle event carries an `event_id`** (`meter.LifecycleEvent.EventID`, `evt_` + 32 hex),
+  fixed when the event is built and resent unchanged on every retry and drain, so billing's exactly-once
+  intake applies to retries. Additive on the wire (SNS too); an older billing ignores it.
+- **`outbox.ErrPublishRefused`** (new): a `Publisher` error wrapping it sends the event down the
+  settle-or-void path at once. The SNS publisher never returns it, so SNS behaviour is unchanged.
+- **`pricing.products.<product>.funding_sources` is validated at config load** (`config.Validate`, i.e.
+  `quota.Setup` / `config.LoadConfig`): an unknown, repeated or empty list is refused, naming the product.
+  Absent / `null` loads as before.
+- **Env-var names** (M3): `mesh.Resolve` reads `BILLING_SERVICE_URL` / `BILLING_SERVICE_API_KEY` /
+  `PAYMENT_SERVICE_URL` / `PAYMENT_SERVICE_API_KEY` first. New constants `mesh.EnvBillingServiceURL`,
+  `EnvBillingServiceAPIKey`, `EnvPaymentServiceURL`, `EnvPaymentServiceAPIKey`; the old per-service
+  constants stay (documented deprecated); `EnvServiceTok` is still the shared last fallback. New
+  `mesh.URLs.BillingSource` / `PaymentSource` (the env var actually read); the capability report and
+  error messages name it. Each deprecated name in use is reported once per process (the Python
+  library's cadence): a name that first appears in a later `Resolve` is still reported, once.
+
+- **Money is exact end to end** (M4). One rule, shared with the Python library and billing: an amount is an
+  exact decimal with at most 6 decimal places (0.000001); rounding happens only where a cost is
+  COMPUTED (price × time), and it is **ROUND_UP to 6 places** — away from zero, so a genuine remainder
+  beyond the 6th place adds at most one micro-unit ($0.000001) and an exact result is never changed;
+  this is billing's rule, so a cost the library computes equals the cost billing computes. No amount is
+  computed with or sent as a float64.
+  - `meter.ParsePricing` refuses a `price_per_hour` / `allocation_price` with more than 6 decimal places
+    (or above $9,007,199,254.740991), naming it (`ErrConfig`).
+  - `meter.Meter.Reserve` refuses an explicit `HourlyRate` / `AllocationFee` / `EstimatedCost` with more
+    than 6 decimal places (`ErrConfig`, before any reserve); the computed hold estimate
+    (`AllocationFee + HourlyRate × HoldHours`) is rounded ROUND_UP to 6 places.
+  - Money fields of billing answers (`ReserveResult` on a 402, `CommitResult`) and of funds events
+    (`FundsEvent.Accrued`, `HoldAmount`, …) are read from the JSON number's exact text when billing sends
+    a number (they used to go through float64). `CommitResult.Raw`, `FundsEvent.Raw` and
+    `FundsEvent.RunwaySeconds` decode exactly as before.
+  - The existing `decimal.Decimal` request fields are unchanged: still sent exactly as given.
+
+### Added — opt-in, nothing to do unless you use them
+- **`billing.Money`** — an exact amount: an int64 count of micro-units, |value| ≤ `MaxMoneyMicros`
+  (2^53 − 1, $9,007,199,254.740991). `ParseMoney(string)`, `MustParseMoney`, `MoneyFromMicros(int64)`,
+  `MoneyFromDecimal`, `String()` (canonical text: `"0.3"`, `"-1.666667"`), `Micros()`, `Decimal()`,
+  `Add` / `Sub` (range-checked), `Cmp`, `Sign`, `Neg`, `IsZero`; marshals as a JSON **string**, unmarshals
+  a string or number exactly. Errors are `*MoneyError` (`Kind`: `MoneySyntax`, `MoneyPrecision`,
+  `MoneyRange`) wrapping `ErrInvalidMoney`. **`CostForDuration(hourlyRate, d)`** — rate × time, ROUND_UP
+  (away from zero) to 6 places, computed in integers (billing's rule, the same as Python's `cost_for`).
+  Pinned by a golden file of cases shared with the Python library (tie and non-tie rows where ROUND_UP
+  differs from HALF_EVEN and HALF_UP, and negative rates, which round away from zero).
+- **`billing.QuotaCheckRequest.CostExact *Money`** — sent as `"cost": "<exact string>"`; nil = the body
+  is byte-for-byte as before.
+
+- **Typed commit: `billing.Client.CommitReservationResult(ctx, org, reservationID, CommitRequest)` →
+  `*CommitResult`** with `CommitOutcome` (`CommitCommitted`, `CommitRecordedDebt`,
+  `CommitInsufficientFunds`, `CommitAlreadySettled`, `CommitNotActive`, `CommitNotFound`,
+  `CommitConflict`, `CommitUnavailable`, `CommitFailed`) and the helpers `Accounted()`,
+  `HoldMayRemain()`, `Retryable()`. Classified from the HTTP status and billing's `code` only (the same
+  table as Python's `CommitOutcome`; `ClassifyCommitError` exposes it). `OnInsufficientFunds`:
+  `OnInsufficientFundsRefuse` (billing's default) or `OnInsufficientFundsRecordDebt` (charge in full,
+  record the shortfall as debt) — record-debt needs the billing-priced form (`StartedAt` + `StoppedAt`,
+  with `HourlyRate` / `AllocationFee`) and a caller-priced record-debt is refused locally
+  (`ErrInvalidRequest`) before any network call. A billing answer or a transport failure is always a
+  result, never an error. `BuildCommitBody` is the shared validation. The meter does not use it (its
+  commit is the stop event).
+- **`meter/metertest.Fake.CommitReservationResult`** (same validation; `CommitResults` /
+  `CommitOutcomes` to script answers; `CommitCalls()`), **`OrgFundsLowPayload`** and
+  **`TriggerOrgFundsLow`**.
+- **Org-level `billing.funds_low`**: billing may send `funds_low` with `trigger: "balance_threshold"`
+  and no `reservation_id` (the org crossed its low-balance threshold). It parses, reaches `OnLow` /
+  `OnFundsLow` (with a nil run), dedups on the org key and is never an error. New
+  `billing.TriggerBalanceThreshold`, `FundsEvent.IsOrgLevel()`, `FundsEvent.Threshold`.
+- **`funding_sources`** — limit which of the org's buckets may fund a hold: declare
+  `pricing.products.<product>.funding_sources: ["balance" | "subscription_credit" | "credit_balance", …]`
+  once and the meter sends it on every reserve of that product (absent = every bucket, the body is as
+  before). Validated by `meter.ParsePricing` (an unknown, repeated or empty list is an `ErrConfig`
+  naming the product). Also `billing.ReserveRequest.FundingSources`, `meter.ReserveInput.FundingSources`
+  (explicit-price reserves only), `meter.Price.FundingSources`, `PriceBook.FundingSources`, the
+  `billing.Funding*` constants, `billing.ValidateFundingSources` and `ReserveResult.FundingSources`
+  (billing's echo, nil when it sent none). Needs a billing that understands `funding_sources` (an older
+  one ignores the field and funds from every bucket — the echo is then nil).
+- **`billing.NewLifecyclePublisher` / `LifecyclePublisher`** (an `outbox.Publisher` with the retry /
+  refusal rules above; `LifecyclePublisherOptions` tunes attempts and backoff) and
+  **`Client.PostLifecycleEvent`** — for a service that builds its own `outbox.Emitter`. An intent without
+  an `event_id` (written by v0.1.12) is sent with a stable id derived from its outbox key.
+
+### Fixed
+
+- **One-shot lifecycle events have a deterministic `event_id`** (new `billing.LifecycleEventID`, the
+  Python emitter's rule): `resource.started` / `stopped` / `deleted` of a reservation is
+  `evt_` + uuid5(`lifecycle:{reservation_id}:{event_type}`), so a re-emitted stop is a replay billing
+  recognises; heartbeats stay fresh. The meter gave every event a random id. Shared golden table with
+  the Python library (`testdata/event_id_golden_20261126.json`).
+- **Absurd decimal exponents no longer hang**: `billing.MoneyFromDecimal` and the config's pricing check
+  judge `decimal.New(1, 1<<30)` / a price `"1e999999999"` from the digit count (range / precision at
+  once; a zero is 0) — the range compare used to rescale by 10^exponent.
+
+- **One auth event → at most one sign-up gift, under any dedup rule** (money): the default credit-grant
+  handler also keys the gift on the source event (`authevents.SourceEventGrantKey`, written on
+  success). Delivery-dedup rows expire (Redis: 72 h) while business rows do not, so an old event
+  re-handled after a `credit_grant.dedup` change used to get a new rule key and a second gift. New
+  events follow the new rule; the grant request is unchanged.
+
+### Added — webhook verification (edge cases)
+
+- **Standard Webhooks verification** in the auth-event receiver: `authevents.VerifyStandardWebhook`,
+  `StandardWebhookKey`, `ReceiverConfig.StandardTolerance` (default 5 minutes) and `.Now`. When a
+  delivery carries `webhook-id` / `webhook-timestamp` / `webhook-signature` (the auth service sends
+  them, one token per secret during a rotation, checked against `Secret` + `PreviousSecrets`), all three
+  must be present and verify — |now − timestamp| ≤ the tolerance (exactly at it is accepted) — else
+  **401, even if `X-Event-Signature` is valid**: a stale timestamp is a replay. Without them,
+  `X-Event-Signature` decides as before. Shared golden with the Python library
+  (`testdata/webhook_signature_golden_20261126.json`, incl. the auth service's vectors).
+
+- **`meter.New`'s "Billing is required" error** suggested `billing.New(mesh.FromEnv())`, a function that
+  does not exist; it now names `billing.New(mesh.Resolve())`.
+- **Release gate** (no API change): `make release` now runs `scripts/packaging-gate.sh` — `go.mod` /
+  `go.sum` tidy, a read-only build, `go mod verify`, and a fresh consumer module that resolves its own
+  dependencies, builds and runs a meter smoke (see `RELEASE.md`).
+
+### Deprecated
+
+- **`billing.QuotaCheckRequest.Cost` (float64)** — set `CostExact` instead. `Cost` is still sent, as before,
+  when `CostExact` is nil.
+
 ## [0.1.12] — 2026-11-23
 
 Metered resources made easy: one helper that reserves funds, sends priced heartbeats and the stop

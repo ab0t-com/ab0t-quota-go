@@ -6,6 +6,8 @@ package billing
 // Billing publishes two CLIENT events:
 //
 //	billing.funds_low        trigger=heartbeat        — still funded, less than the low-water runway
+//	                         trigger=balance_threshold — (v0.2.0) the ORG's available funds fell to its
+//	                                                    low-balance threshold; no reservation_id
 //	billing.funds_exhausted  trigger=heartbeat        — the resource is STILL RUNNING; further runtime is debt
 //	                         trigger=commit_overrun   — a stop cost more than hold + funds (already stopped)
 //	                         trigger=settlement_debt  — a late settlement drove the balance negative (already stopped)
@@ -47,6 +49,10 @@ const (
 	TriggerHeartbeat      = "heartbeat"
 	TriggerCommitOverrun  = "commit_overrun"
 	TriggerSettlementDebt = "settlement_debt"
+	// TriggerBalanceThreshold (v0.2.0): billing.funds_low for the ORG, not a resource — the org's
+	// available funds fell to or below its low-balance threshold (once per crossing). It carries
+	// no reservation_id; FundsEvent.IsOrgLevel() is true and it reaches OnLow like any funds_low.
+	TriggerBalanceThreshold = "balance_threshold"
 )
 
 // DefaultFundsDedupTTL is the default dedup window (a re-armed transition after it is delivered again).
@@ -79,12 +85,19 @@ type FundsEvent struct {
 	ReservedAmount  *decimal.Decimal
 	UnfundedOverrun *decimal.Decimal
 	NewBalance      *decimal.Decimal
+	// Threshold (v0.2.0) is the org's low-balance threshold on an org-level funds_low
+	// (TriggerBalanceThreshold); Available is then the org's available funds. Nil when absent.
+	Threshold *decimal.Decimal
 
 	Raw map[string]any
 }
 
 // IsRunningResource is true only for heartbeat-triggered events: the resource is running NOW.
 func (e FundsEvent) IsRunningResource() bool { return e.Trigger == TriggerHeartbeat }
+
+// IsOrgLevel (v0.2.0) is true for an event about the org's funds rather than one reservation (no
+// reservation_id — e.g. trigger balance_threshold). A meter hook then receives a nil run.
+func (e FundsEvent) IsOrgLevel() bool { return e.ReservationID == "" }
 
 // IsDebt is true when usage is (or will be) recorded beyond the org's funds.
 func (e FundsEvent) IsDebt() bool { return e.Kind == FundsExhausted }
@@ -123,6 +136,12 @@ func ParseFundsEvent(msg []byte) (*FundsEvent, error) {
 	if org == "" {
 		return nil, fmt.Errorf("%w: %s without org_id", ErrMalformedFundsEvent, kind.EventType())
 	}
+	// v0.2.0: money fields are read from a second decode that keeps every JSON number's exact text
+	// (json.Number), never a float64. Raw (and runway_seconds) keep the earlier decoding.
+	money, _ := unwrapEventWith(msg, true)
+	if money == nil {
+		money = raw
+	}
 	ev := &FundsEvent{
 		Kind:            kind,
 		EventType:       kind.EventType(),
@@ -134,14 +153,15 @@ func ParseFundsEvent(msg []byte) (*FundsEvent, error) {
 		SettlementKey:   text(raw["settlement_key"]),
 		Timestamp:       when(raw["timestamp"]),
 		StartedAt:       when(raw["started_at"]),
-		Accrued:         decimalField(raw, "accrued"),
-		HoldAmount:      decimalField(raw, "hold_amount"),
-		Available:       decimalField(raw, "available"),
-		HourlyRate:      decimalField(raw, "hourly_rate"),
-		ActualCost:      decimalField(raw, "actual_cost"),
-		ReservedAmount:  decimalField(raw, "reserved_amount"),
-		UnfundedOverrun: decimalField(raw, "unfunded_overrun"),
-		NewBalance:      decimalField(raw, "new_balance"),
+		Accrued:         decimalField(money, "accrued"),
+		HoldAmount:      decimalField(money, "hold_amount"),
+		Available:       decimalField(money, "available"),
+		HourlyRate:      decimalField(money, "hourly_rate"),
+		ActualCost:      decimalField(money, "actual_cost"),
+		ReservedAmount:  decimalField(money, "reserved_amount"),
+		UnfundedOverrun: decimalField(money, "unfunded_overrun"),
+		NewBalance:      decimalField(money, "new_balance"),
+		Threshold:       decimalField(money, "threshold"),
 		Raw:             raw,
 	}
 	if f, ok := raw["runway_seconds"].(float64); ok {
@@ -150,11 +170,18 @@ func ParseFundsEvent(msg []byte) (*FundsEvent, error) {
 	return ev, nil
 }
 
-func unwrapEvent(msg []byte) (map[string]any, error) {
+func unwrapEvent(msg []byte) (map[string]any, error) { return unwrapEventWith(msg, false) }
+
+// unwrapEventWith is unwrapEvent; exactNumbers keeps every JSON number as json.Number (v0.2.0).
+func unwrapEventWith(msg []byte, exactNumbers bool) (map[string]any, error) {
 	cur := msg
 	for i := 0; i < 4; i++ {
 		var v any
-		if err := json.Unmarshal(cur, &v); err != nil {
+		if exactNumbers {
+			if err := decodeOneExact(cur, &v); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrMalformedFundsEvent, err)
+			}
+		} else if err := json.Unmarshal(cur, &v); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrMalformedFundsEvent, err)
 		}
 		if s, ok := v.(string); ok { // a JSON-encoded string holding JSON

@@ -76,6 +76,11 @@ type CreditGrantRequest struct {
 	RolloverMax *decimal.Decimal
 }
 
+// SourceEventGrantKey (v0.2.0) is the durable ledger key of "this source EVENT already produced a
+// sign-up grant" — independent of the dedup RULE. Same key as the Python library's
+// compose_source_event_grant_key.
+func SourceEventGrantKey(eventID string) string { return "credit_grant_event:" + eventID }
+
 // BillingIdempotencyKey returns the billing idempotency key for a sign-up grant
 // under the given dedup policy (see CreditGrantRequest.IdempotencyKey).
 func BillingIdempotencyKey(policy, userID, orgID, tierID string) string {
@@ -207,6 +212,22 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 		dedupKey := ComposeCreditDedupKey(policy, userID, orgID, tierID)
 		hctx.DedupKey = dedupKey
 
+		// v0.2.0: the grant is ALSO keyed on the SOURCE event — one event produces at most one
+		// grant under any dedup rule, so a company that changes credit_grant.dedup and re-handles an
+		// old event does not grant twice; a new event follows the new rule. Same key as Python
+		// (compose_source_event_grant_key). The billing request is unchanged.
+		eventKey := SourceEventGrantKey(ev.GetEventID())
+		if hctx.Store != nil {
+			done, err := hctx.Store.AlreadyDone(ctx, eventKey)
+			if err != nil {
+				return fmt.Errorf("source-event dedup check: %w", err)
+			}
+			if done {
+				hooks.OnSkipped("source event already granted: "+ev.GetEventID(), ev)
+				return hctx.Skip("source event already granted")
+			}
+		}
+
 		already, err := hctx.AlreadyDone(ctx)
 		if err != nil {
 			return fmt.Errorf("dedup check: %w", err)
@@ -242,6 +263,14 @@ func BuildDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, e
 
 		if err := hctx.MarkDone(ctx, ev.GetEventID()); err != nil {
 			slog.Warn("mark business dedup failed", "key", dedupKey, "err", err)
+		}
+		if hctx.Store != nil {
+			if err := hctx.Store.MarkDone(ctx, handlerledger.MarkDoneInput{
+				DedupKey: eventKey, SourceHandler: hctx.HandlerName, SourceEventID: ev.GetEventID(),
+				SideEffectID: req.IdempotencyKey,
+			}); err != nil {
+				slog.Warn("mark source-event dedup failed", "key", eventKey, "err", err)
+			}
 		}
 
 		hooks.OnGranted(req)

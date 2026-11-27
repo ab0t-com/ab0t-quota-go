@@ -107,11 +107,14 @@ no-ops. Use `--dry-run` to preview without sending.
 ### delete-user — GDPR forget
 
 ```bash
-quotactl delete-user --user-id u-alice
+quotactl delete-user --user-id u-alice   # v0.1.10+: refuses (non-zero exit) — see below
 ```
 
-Removes all handler-ledger rows for the user_id. The counters
-(per-org metering) are untouched — they don't carry user_id by default.
+The standalone CLI cannot reach your service's ledger (v0.1.9 printed
+"deleted 0 rows" and exited 0 while the real ledger kept the data). Run
+`q.LedgerStore.DeleteUser(ctx, userID)` inside the service — it removes all
+handler-ledger rows for the user_id. The counters (per-org metering) are
+untouched — they don't carry user_id by default.
 
 ### capabilities — print the Setup snapshot
 
@@ -154,9 +157,10 @@ quotactl doctor --config quota-config.json [--json] [--fail-on-risk] [--timeout 
 ```
 
 Grades what "bootable" lets through: persistence behind a durability
-assertion, PITR asserted-not-observed, already-evicted keys, ACL breadth,
-encryption. Reports what it could not check as `not_checked` with the
-reason. Exit mirrors the shared taxonomy (0 ok / 1 gate / 2 config /
+assertion, PITR asserted-not-observed, already-evicted keys, encryption in
+transit. Reports what it could not check as `not_checked` with the reason —
+in the Go runtime that includes ACL/IAM breadth (compare the server's ACL
+out-of-band with `quotactl provision --emit acl`). Exit mirrors the shared taxonomy (0 ok / 1 gate / 2 config /
 3 unreachable / 4 internal); `--fail-on-risk` turns RISK findings into
 exit 1; `--json` extends the preflight report schema with a posture section.
 **Honest side-effect statement (also in the command's own output): Go's
@@ -172,9 +176,27 @@ doctor's only server-visible write is the disclosed `SCRIPT LOAD`).
 # 1. Confirm config + env produce the expected wiring
 quotactl capabilities --config quota-config.json
 
-# 2. Register the webhook subscription
+# 2. Before go-live: grade production posture (NOT read-only — see doctor above)
+quotactl doctor --config quota-config.json --fail-on-risk
+
+# 3. Register the webhook subscription
 quotactl subscribe-events
 ```
+
+### Rotating the webhook secret
+
+Auth cannot edit a subscription's secret. Deploy the service with the NEW
+secret in `AB0T_AUTH_WEBHOOK_SECRET` and the old one in
+`AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` (the receiver accepts both), then:
+
+```bash
+quotactl subscribe-events --rotate-secret   # deletes + re-creates; admin token needs events.delete too
+```
+
+Events between the delete and the create are not delivered — run `backfill`
+for sign-ups in that window. Remove `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` once
+deliveries verify. (v0.1.9: delete the subscription in auth, then run
+`subscribe-events` again.)
 
 ### Disaster recovery — missed events
 
@@ -198,19 +220,23 @@ use `backfill` (new event ids; business dedup keeps granted users no-ops).
 psql -tc "select id, org_id from users where created_at < '2026-01-01'" \
   | tr -d ' ' > users.csv
 
-# 2. Dry-run to confirm shape
+# 2. Dry-run to confirm shape (secret from AB0T_AUTH_WEBHOOK_SECRET)
 quotactl backfill --input users.csv --dry-run \
-  --target ... --secret ...
+  --target https://svc.example.com/api/quotas/_webhooks/auth
 
 # 3. Real run — receiver dedups so this is idempotent
 quotactl backfill --input users.csv \
-  --target ... --secret ...
+  --target https://svc.example.com/api/quotas/_webhooks/auth
 ```
 
 ### GDPR delete
 
-```bash
-quotactl delete-user --user-id u-alice
+`quotactl delete-user` cannot reach your service's ledger and refuses
+(non-zero exit) — run the deletion inside the service:
+
+```go
+// e.g. from an admin route; keep the result as your deletion record
+n, err := q.LedgerStore.DeleteUser(ctx, userID)
 ```
 
 Then also flush the user from your billing/auth systems separately.
@@ -219,11 +245,10 @@ Then also flush the user from your billing/auth systems separately.
 
 The receiver accepts both:
 
-- `X-Event-Signature: sha256=<hex>` (canonical, default)
-- `X-Event-Signature: <hex>` (bare; CLI default for replay/backfill)
+- `X-Event-Signature: sha256=<hex>` (canonical; what `replay` / `backfill` send by default)
+- `X-Event-Signature: <hex>` (bare; send it with `--bare`)
 
-`--bare` toggles the CLI form. Python ab0t-quota's CLI uses bare; keep
-parity if you run a mixed Python/Go fleet.
+Use `--bare` only if your target rejects the prefixed form.
 
 ## Build it yourself
 
@@ -235,11 +260,14 @@ make install   # → $GOBIN/quotactl
 
 # Cross-compile all platforms
 make dist VERSION=v0.1.10
-ls release/v0.1.0/
+ls release/v0.1.10/   # quotactl-<os>-<arch>[.exe] + SHA256SUMS
 ```
 
 ## Exit codes
 
 - `0` — success
-- `2` — usage error (missing flag, bad arg)
-- non-zero (other) — runtime error; stderr has the detail
+- `2` — any error a subcommand returns (usage error, or a runtime failure such
+  as a failed `subscribe-events` call, a `replay` / `backfill` event that was
+  not accepted, or the ledger verbs' refusal); stderr has `error: …`
+- `doctor`: shared taxonomy 0 ok / 1 gate / 2 config / 3 unreachable / 4 internal
+- `provision`: `--local` exits 3 if docker fails; 4 = internal error emitting an artifact

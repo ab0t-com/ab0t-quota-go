@@ -587,8 +587,9 @@ For ongoing operations:
 - 401 on every webhook event — `AB0T_AUTH_WEBHOOK_SECRET` mismatch.
 - 200 with `"status":"ignored"` — no handler registered for that
   event_type.
-- 429 with `reason: tier_unresolved` — Identity returns no
-  user/org, or tier provider can't resolve.
+- 503 with `reason: tier_unresolved` (v0.2.0+) — Identity returns no
+  user/org, or tier provider can't resolve. Before v0.2.0 such a
+  request was admitted unlimited.
 - 429 with `reason: tier_not_in_config` — your tier_provider
   returned an ID not in `config.tiers[]`. Common when a new tier
   exists in auth but you forgot to update the gateway's JSON.

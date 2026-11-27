@@ -104,6 +104,14 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// v0.2.0: a declared pricing.products.<product>.funding_sources must name billing's buckets.
+	if err := validatePricingFundingSources(c.Pricing); err != nil {
+		return err
+	}
+	// v0.2.0: declared prices are exact to 6 decimal places (money is never rounded silently).
+	if err := validatePricingPrices(c.Pricing); err != nil {
+		return err
+	}
 	return nil
 }
 

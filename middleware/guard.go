@@ -25,14 +25,16 @@ type GuardConfig struct {
 	Identity   Identity
 	Router     ResourceRouter
 	Exempt     []string // path prefixes to skip entirely (e.g. "/healthz")
-	FailOpen   bool     // engine error → allow (true) or deny (false)
+	FailOpen   bool     // engine error → allow (true) or deny (false). Not an unresolved tier (see enforcement.allow_unknown_tier)
 	OnWarn     func(*http.Request, engine.Result)
 	OnDecision func(*http.Request, engine.Result) // every check, allowed or denied
 }
 
 // Guard wraps next with a quota check. On allow, dispatches to next. On
-// deny, returns 429. Headers are always written via WriteHeaders so
-// consumers can observe remaining budget on every response.
+// deny, returns 429. Since v0.2.0 an unresolved tier (UnknownTier) returns 503
+// unless the config sets enforcement.allow_unknown_tier. Headers are always
+// written via WriteHeaders so consumers can observe remaining budget on every
+// response.
 func Guard(cfg GuardConfig) func(http.Handler) http.Handler {
 	if cfg.Engine == nil {
 		panic("middleware.Guard: Engine required")
@@ -96,6 +98,14 @@ func Guard(cfg GuardConfig) func(http.Handler) http.Handler {
 					cfg.OnWarn(r, res)
 				}
 				WriteWarn(w, res)
+			}
+			if res.Unavailable() {
+				// v0.2.0: the tier could not be resolved, so the limit could not be evaluated —
+				// fail closed with 503 (not 429: the caller is not over any limit). Opt-out:
+				// enforcement.allow_unknown_tier in the config.
+				slog.Warn("quota guard: tier unresolved, fail-closed", "resource", resourceKey, "org", orgID)
+				WriteUnavailable(w, res)
+				return
 			}
 			if !res.Allowed() {
 				WriteDenial(w, res)

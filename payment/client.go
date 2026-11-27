@@ -17,7 +17,7 @@ type Client struct {
 // New constructs a Client. Returns an error if the payment URL is missing.
 func New(u mesh.URLs) (*Client, error) {
 	if u.Payment == "" {
-		return nil, errors.New("payment: AB0T_QUOTA_PAYMENT_URL not set")
+		return nil, errors.New("payment: " + mesh.EnvPaymentServiceURL + " not set (deprecated name: " + mesh.EnvPaymentURL + ")")
 	}
 	return &Client{http: httpx.New(u.Payment, u.PaymentToken)}, nil
 }

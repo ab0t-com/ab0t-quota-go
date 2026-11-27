@@ -72,6 +72,12 @@ type EnforcementConfig struct {
 	// in enforce mode; "allow_warn" admits with a loud warning. A typo must
 	// NEVER silently disable enforcement (fail-OPEN, D-31).
 	UnknownBundle string `json:"unknown_bundle,omitempty"`
+	// AllowUnknownTier (v0.2.0) is the opt-out for the fail-closed unresolved-tier default. When
+	// the tier resolver fails or returns blank, the engine's UnknownTier decision does NOT proceed
+	// (Result.Allowed() false; the middleware answers 503) — unless this is true, which restores the
+	// pre-v0.2.0 behaviour (the request proceeds unlimited). Leave it false wherever admitted work
+	// costs money.
+	AllowUnknownTier bool `json:"allow_unknown_tier,omitempty"`
 }
 
 // LegacyIncrementMode returns the effective legacy-increment policy (D-24),

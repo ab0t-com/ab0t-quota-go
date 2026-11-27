@@ -1,0 +1,6 @@
+{
+  "storage": { "redis_url": "memory://" },
+  "tier_provider": { "type": "static", "default_tier": "pro", "mapping": { "alice": "pro" } },
+  "tiers": [ { "tier_id": "pro", "limits": {} } ],
+  "resources": []
+}

@@ -258,11 +258,10 @@ For every quota-config.json before it goes to prod:
    `subscription_revenue - (max_consumption × unit_cost)`. If negative
    at the cap, you're selling at a loss to the heaviest user. Either
    raise the price or lower the cap.
-4. **What happens when Redis is down?** With v0.1.0 the answer is "in-
-   memory store, counters reset on restart, capabilities log warns."
-   Decide if that's acceptable. (For sandbox-platform: yes, because the
-   cost cap is enforced by the hourly cost_manager tick, not by
-   per-request increments.)
+4. **What happens when Redis is down?** Decide per path (gauges fail
+   open on a truth-source outage, accumulators keep the deny) and check
+   `quotactl capabilities` / `quotactl doctor` for what is actually
+   wired. (A declared Redis is never silently swapped for in-memory.)
 5. **What's our worst-case month?** Pick the heaviest user, assume
    they max out, multiply by 30 days. Can you absorb it?
 6. **Do we have shadow mode?** Set `enforcement.shadow_mode=true`

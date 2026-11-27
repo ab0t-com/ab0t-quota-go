@@ -37,9 +37,11 @@ const (
 
 func ksConfig() *config.Config {
 	return &config.Config{
-		ServiceName:  ksSvc,
-		Enforcement:  config.EnforcementConfig{Enabled: true},
-		TierProvider: config.TierProviderConfig{Type: "static", Mapping: map[string]string{"alice": "pro"}},
+		ServiceName: ksSvc,
+		Enforcement: config.EnforcementConfig{Enabled: true},
+		// v0.2.0 fails CLOSED on an unresolved tier (see the changelog), so the static provider needs
+		// a default for the no-UserID acquires this keyspace test makes — the test is about key shapes, not tier resolution.
+		TierProvider: config.TierProviderConfig{Type: "static", Mapping: map[string]string{"alice": "pro"}, DefaultTier: "pro"},
 		Tiers: []config.Tier{
 			{TierID: "pro", Limits: map[string]config.TierLimit{
 				ksRK: {Limit: ptrFloat(10)},

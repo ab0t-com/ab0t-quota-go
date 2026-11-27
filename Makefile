@@ -1,7 +1,7 @@
 # Convenience targets. Most contributors invoke `go ...` directly; this
 # file is for local muscle memory + CI parity.
 
-.PHONY: all test race vet fmt tidy build install dist release clean cover examples lint scan scan-staged scan-history hooks
+.PHONY: all test race vet fmt tidy build install dist release clean cover examples lint scan scan-staged scan-history hooks packaging-gate
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.1.0-dev)
 
@@ -27,6 +27,11 @@ build:
 
 examples:
 	go build ./examples/...
+
+# The module as a consumer gets it: tidy go.mod/go.sum, read-only build, go mod verify, and a fresh
+# consumer module that builds + runs a meter smoke. Also run by `make release`.
+packaging-gate:
+	bash scripts/packaging-gate.sh
 
 # Build + install quotactl into $GOBIN.
 install:

@@ -35,6 +35,11 @@ the annotated tag. `release/vX.Y.Z/` holds the notes for each cut.
 
 1. **vet** — `go vet ./...` + `gofmt -l` (unformatted files fail).
 2. **test** — full `go test ./...`, including integration tests. All must pass.
+   **packaging** — `scripts/packaging-gate.sh` (`make packaging-gate`): `go.mod` / `go.sum` tidy, a
+   read-only build, `go mod verify`, then a FRESH consumer module (outside the repo, `replace` to the
+   checkout) resolves its own dependencies, builds and runs a smoke program (`meter.New` + `Reserve`
+   against the in-process fake, `billing.New`, `mesh.Resolve`, exact money). Catches a dependency the
+   published metadata does not provide — it builds in your warm cache and fails for the first consumer.
 3. **build** — the static binary builds, version-stamped from git.
 4. **scan** — `gitleaks` over the tree; **aborts on any hit.** Install `gitleaks`
    first. `make scan-staged` runs the staged-only variant the pre-commit hook uses.

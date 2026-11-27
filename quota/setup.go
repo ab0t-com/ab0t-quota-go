@@ -500,13 +500,15 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 
 	// Mesh-side clients (optional).
 	mu := mesh.Resolve()
+	// v0.2.0: canonical BILLING_SERVICE_URL / PAYMENT_SERVICE_URL (what `authsetup connect` prints),
+	// the AB0T_QUOTA_* names as a deprecated fallback — the source names the one actually read.
 	if mu.Billing != "" {
-		cap.Resolved["billing_url"] = ResolvedEntry{Value: mu.Billing, Source: "env " + mesh.EnvBillingURL}
+		cap.Resolved["billing_url"] = ResolvedEntry{Value: mu.Billing, Source: "env " + firstSet(mu.BillingSource, mesh.EnvBillingServiceURL)}
 	} else {
 		cap.Resolved["billing_url"] = ResolvedEntry{Value: "", Source: "unset"}
 	}
 	if mu.Payment != "" {
-		cap.Resolved["payment_url"] = ResolvedEntry{Value: mu.Payment, Source: "env " + mesh.EnvPaymentURL}
+		cap.Resolved["payment_url"] = ResolvedEntry{Value: mu.Payment, Source: "env " + firstSet(mu.PaymentSource, mesh.EnvPaymentServiceURL)}
 	} else {
 		cap.Resolved["payment_url"] = ResolvedEntry{Value: "", Source: "unset"}
 	}
@@ -529,7 +531,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			cap.WhyOff["billing"] = err.Error()
 		}
 	} else {
-		cap.WhyOff["billing"] = "AB0T_QUOTA_BILLING_URL not set"
+		cap.WhyOff["billing"] = mesh.EnvBillingServiceURL + " not set (deprecated name: " + mesh.EnvBillingURL + ")"
 	}
 	if mu.Payment != "" {
 		c, err := payment.New(mu)
@@ -540,7 +542,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			cap.WhyOff["payment"] = err.Error()
 		}
 	} else {
-		cap.WhyOff["payment"] = "AB0T_QUOTA_PAYMENT_URL not set"
+		cap.WhyOff["payment"] = mesh.EnvPaymentServiceURL + " not set (deprecated name: " + mesh.EnvPaymentURL + ")"
 	}
 
 	// Alerts.
@@ -698,7 +700,8 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		// v0.1.10: BillingCreditGranter(nil) = "use the billing client Setup builds".
 		if q.Billing == nil {
 			return nil, errors.New("quota.Setup: CreditGranter is quota.BillingCreditGranter(nil) but billing " +
-				"is not wired — set AB0T_QUOTA_BILLING_URL and AB0T_QUOTA_BILLING_TOKEN (your billing key), or " +
+				"is not wired — set " + mesh.EnvBillingServiceURL + " and " + mesh.EnvBillingServiceAPIKey + " (your billing key; " +
+				"the deprecated names " + mesh.EnvBillingURL + " / " + mesh.EnvBillingTok + " still work), or " +
 				"pass a *billing.Client. A sign-up grant that can never reach billing must not look wired")
 		}
 		granter = &billingCreditGranter{c: q.Billing}
@@ -794,7 +797,7 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	enablePaid := cfg.Billing.EnablePaid || q.Billing != nil
 	paidWhy := "billing.enable_paid=true in the config"
 	if !cfg.Billing.EnablePaid && q.Billing != nil {
-		paidWhy = "AB0T_QUOTA_BILLING_URL is set (wiring billing asserts paid mode)"
+		paidWhy = firstSet(mu.BillingSource, mesh.EnvBillingServiceURL) + " is set (wiring billing asserts paid mode)"
 	}
 	if opts.EnablePaid != nil {
 		enablePaid = *opts.EnablePaid
@@ -812,6 +815,23 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			slog.Error("settlement publisher: SNS configured but client build failed", "err", serr)
 		}
 	}
+	// v0.2.0 — no SNS topic configured and no publisher supplied, but billing is wired: deliver
+	// lifecycle events to billing over HTTPS (POST /billing/{org}/lifecycle-events, the same API key
+	// as reserve), retrying 503 / transport failures; an undelivered event stays in the durable
+	// outbox for the drain loop exactly as with SNS. A configured SNS topic whose client failed to
+	// build is NOT replaced — that stays a refused chain, loudly.
+	lifecycleTransport := "none"
+	switch {
+	case opts.SettlementPublisher != nil:
+		lifecycleTransport = "custom (Options.SettlementPublisher)"
+	case publisher != nil:
+		lifecycleTransport = "sns (outbox.sns_topic_arn)"
+	case cfg.Outbox.SNSTopicARN == "" && q.Billing != nil:
+		publisher = billing.NewLifecyclePublisher(q.Billing, billing.LifecyclePublisherOptions{})
+		lifecycleTransport = "https (billing lifecycle-events; no outbox.sns_topic_arn)"
+		slog.Info("settlement publisher: HTTPS to billing (auto-wired: billing is wired and no SNS topic is configured)")
+	}
+	cap.Resolved["lifecycle_transport"] = ResolvedEntry{Value: lifecycleTransport, Source: "quota.Setup (v0.2.0)"}
 	if err := q.gateBillingChain(ctx, cfg, redisClient, publisher, enablePaid, opts.SkipBackgroundLoops, &cap); err != nil {
 		// v0.1.10 (ticket 20261016, C-23): say WHY paid mode is on and how to opt out —
 		// the usual cause is setting AB0T_QUOTA_BILLING_URL for credit grants alone.
@@ -855,8 +875,9 @@ func (q *Quota) gateBillingChain(ctx context.Context, cfg *config.Config, redisC
 		why  string
 	}{
 		{"durable_store", durable, "no durable outbox (" + detail + ")"},
-		{"publisher", publisher != nil, "no settlement publisher wired (Options.SettlementPublisher)"},
-		{"billing_sink", q.Billing != nil, "no billing sink (AB0T_QUOTA_BILLING_URL not set)"},
+		{"publisher", publisher != nil, "no settlement publisher wired (Options.SettlementPublisher, outbox.sns_topic_arn, " +
+			"or — since v0.2.0 — HTTPS to billing, automatic once " + mesh.EnvBillingServiceURL + " is set and no SNS topic is configured)"},
+		{"billing_sink", q.Billing != nil, "no billing sink (" + mesh.EnvBillingServiceURL + " not set; deprecated name " + mesh.EnvBillingURL + ")"},
 	}
 	cap.Outbox = detail
 	if durable {
@@ -1305,6 +1326,14 @@ func newSNSClient(ctx context.Context, oc config.OutboxConfig) (*sns.Client, err
 		opts = append(opts, func(o *sns.Options) { o.BaseEndpoint = aws.String(ep) })
 	}
 	return sns.NewFromConfig(awsCfg, opts...), nil
+}
+
+// firstSet returns v, or fallback when v is empty (v0.2.0: names the env var a value came from).
+func firstSet(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }
 
 // providerAdapter bridges providers.Provider → authevents.TierProvider.

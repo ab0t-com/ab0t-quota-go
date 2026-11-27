@@ -5,6 +5,8 @@
 #   1. clean working tree check
 #   2. go vet
 #   3. go test -race
+#   3b. packaging gate (scripts/packaging-gate.sh): tidy go.mod/go.sum, read-only build,
+#       go mod verify, and a fresh consumer module that builds + runs a meter smoke
 #   4. cross-compile binaries (build.sh)
 #   5. write release notes scaffold
 #   6. print the exact tag + push commands for the operator to run
@@ -46,6 +48,11 @@ go vet ./...
 # 3. Race-detector tests.
 echo "==> go test -race -count=1 ./..."
 go test -race -count=1 ./...
+
+# 3b. Packaging gate — the module as a CONSUMER gets it (blocks on a dependency the published
+#     go.mod / go.sum does not provide, or a consumer that cannot build / construct a meter).
+echo "==> packaging gate"
+bash scripts/packaging-gate.sh
 
 # 4. Secret scan — block release on any finding.
 echo "==> gitleaks scan"

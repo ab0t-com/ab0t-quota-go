@@ -3,7 +3,8 @@
 // ab0t_quota.billing.testing.FakeBilling.
 //
 // Fake is both halves a client talks to: the meter.Biller (ReserveFunds with a balance check and
-// request-id idempotency, RefundReservationOutcome, GetBalance) and the meter.EventSink (Emit records
+// request-id idempotency, RefundReservationOutcome, GetBalance, and since v0.2.0 the typed
+// CommitReservationResult) and the meter.EventSink (Emit records
 // every lifecycle event in its wire shape). So meter.New(meter.Config{Billing: f, Sink: f}) runs end
 // to end in a unit test, and the test can
 //
@@ -70,6 +71,14 @@ type Fake struct {
 	// EmitErr, when set, is returned by the next Emit calls (counted down by EmitErrCount; 0 = forever).
 	EmitErr      error
 	EmitErrCount int
+	// CommitResults (v0.2.0): full answers returned by the next CommitReservationResult calls, in
+	// order. Consumed before CommitOutcomes.
+	CommitResults []billing.CommitResult
+	// CommitOutcomes (v0.2.0): outcomes returned by the next commits, in order (e.g.
+	// CommitInsufficientFunds, CommitRecordedDebt, CommitUnavailable). Default: billing's
+	// classification of the fake's state (the fake prices nothing, so it never decides
+	// CommitInsufficientFunds itself).
+	CommitOutcomes []billing.CommitOutcome
 
 	mu           sync.Mutex
 	balances     map[string]decimal.Decimal
@@ -77,6 +86,7 @@ type Fake struct {
 	byRequest    map[string]billing.ReserveResult
 	events       []meter.LifecycleEvent
 	reserveCalls []billing.ReserveRequest
+	commitCalls  []map[string]any
 	targets      []Target
 	next         int
 }
@@ -137,6 +147,12 @@ func (f *Fake) ReserveCalls() []billing.ReserveRequest {
 func (f *Fake) ReserveFunds(_ context.Context, orgID string, in billing.ReserveRequest) (*billing.ReserveResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// v0.2.0: the same funding_sources validation as billing.Client.ReserveFunds, before the call
+	// "reaches billing" (the fake funds every hold from its one cash balance; the declared sources
+	// are recorded in ReserveCalls).
+	if err := billing.ValidateFundingSources(in.FundingSources); err != nil {
+		return nil, fmt.Errorf("%w: ReserveFunds: %v", billing.ErrInvalidRequest, err)
+	}
 	f.reserveCalls = append(f.reserveCalls, in)
 	if len(f.ReserveFailures) > 0 {
 		err := f.ReserveFailures[0]
@@ -216,6 +232,83 @@ func (f *Fake) RefundReservationOutcome(_ context.Context, orgID, reservationID,
 	}
 	r.Status = "refunded"
 	return billing.RefundRefunded
+}
+
+// CommitReservationResult mirrors billing.Client.CommitReservationResult (v0.2.0): the same local
+// validation (billing.BuildCommitBody — an ErrInvalidRequest error before anything is recorded),
+// the body billing would receive recorded in CommitCalls, the answer from CommitResults /
+// CommitOutcomes when scripted, else from the fake's state. Prices nothing (ActualCost stays nil).
+func (f *Fake) CommitReservationResult(_ context.Context, orgID, reservationID string, in billing.CommitRequest) (*billing.CommitResult, error) {
+	body, err := billing.BuildCommitBody(orgID, reservationID, in)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	call := map[string]any{"org_id": orgID}
+	for k, v := range body {
+		call[k] = v
+	}
+	f.commitCalls = append(f.commitCalls, call)
+	recordDebt := in.OnInsufficientFunds == billing.OnInsufficientFundsRecordDebt
+	r := f.reservations[reservationID]
+	open := r != nil && (r.Status == "reserved" || r.Status == "running")
+	charged := func(o billing.CommitOutcome) bool {
+		return o == billing.CommitCommitted || o == billing.CommitRecordedDebt
+	}
+	if len(f.CommitResults) > 0 || len(f.CommitOutcomes) > 0 {
+		var res billing.CommitResult
+		if len(f.CommitResults) > 0 {
+			res = f.CommitResults[0]
+			f.CommitResults = f.CommitResults[1:]
+		} else {
+			o := f.CommitOutcomes[0]
+			f.CommitOutcomes = f.CommitOutcomes[1:]
+			res = billing.CommitResult{Outcome: o, ReservationID: reservationID}
+			if r != nil && charged(o) {
+				amount := r.Amount
+				res.ReservedAmount = &amount
+			}
+			if recordDebt && charged(o) {
+				res.CommitMode = billing.OnInsufficientFundsRecordDebt
+			}
+			if recordDebt && o == billing.CommitCommitted {
+				zero := decimal.Zero
+				res.UnfundedOverrun = &zero
+			}
+		}
+		if charged(res.Outcome) && open {
+			r.Status = "committed"
+		}
+		return &res, nil
+	}
+	switch {
+	case r == nil || r.OrgID != orgID:
+		return &billing.CommitResult{Outcome: billing.CommitNotFound, ReservationID: reservationID,
+			StatusCode: 404, Code: "RESERVATION_NOT_FOUND"}, nil
+	case r.Status == "committed":
+		return &billing.CommitResult{Outcome: billing.CommitAlreadySettled, ReservationID: reservationID,
+			StatusCode: 409, Code: "RESERVATION_ALREADY_SETTLED"}, nil
+	case r.Status == "refunded":
+		return &billing.CommitResult{Outcome: billing.CommitNotActive, ReservationID: reservationID,
+			StatusCode: 409, Code: "RESERVATION_NOT_ACTIVE"}, nil
+	}
+	r.Status = "committed"
+	amount := r.Amount
+	res := &billing.CommitResult{Outcome: billing.CommitCommitted, ReservationID: reservationID, ReservedAmount: &amount}
+	if recordDebt {
+		zero := decimal.Zero
+		res.CommitMode = billing.OnInsufficientFundsRecordDebt
+		res.UnfundedOverrun = &zero
+	}
+	return res, nil
+}
+
+// CommitCalls returns every commit body billing would have received (plus "org_id").
+func (f *Fake) CommitCalls() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.commitCalls...)
 }
 
 // GetBalance mirrors billing.Client.GetBalance.
@@ -407,6 +500,43 @@ func (f *Fake) Deliver(ctx context.Context, payload map[string]any) ([]billing.D
 // TriggerFundsLow delivers billing.funds_low (trigger heartbeat) for reservationID.
 func (f *Fake) TriggerFundsLow(ctx context.Context, reservationID string, fields map[string]any) ([]billing.DispatchResult, error) {
 	return f.Deliver(ctx, f.FundsPayload(billing.FundsLow, reservationID, billing.TriggerHeartbeat, fields))
+}
+
+// OrgFundsLowPayload (v0.2.0) is billing's wire payload for the ORG-level billing.funds_low
+// (trigger balance_threshold): no reservation_id, the org's available funds and its threshold.
+// fields override (e.g. "available", "threshold", "balance").
+func (f *Fake) OrgFundsLowPayload(orgID string, fields map[string]any) map[string]any {
+	f.mu.Lock()
+	avail := f.balances[orgID].Sub(f.heldLocked(orgID))
+	held := f.heldLocked(orgID)
+	balance := f.balances[orgID]
+	f.mu.Unlock()
+	p := map[string]any{
+		"event_type":          billing.FundsLow.EventType(),
+		"trigger":             billing.TriggerBalanceThreshold,
+		"org_id":              orgID,
+		"timestamp":           time.Now().UTC().Format(time.RFC3339Nano),
+		"state":               "low",
+		"available":           avail.String(),
+		"threshold":           "0",
+		"balance":             balance.String(),
+		"credit_balance":      "0",
+		"subscription_credit": "0",
+		"reserved":            held.String(),
+	}
+	for k, v := range fields {
+		if d, ok := v.(decimal.Decimal); ok {
+			v = d.String()
+		}
+		p[k] = v
+	}
+	return p
+}
+
+// TriggerOrgFundsLow (v0.2.0) delivers the org-level billing.funds_low (trigger balance_threshold,
+// no reservation_id) to every attached target — a meter routes it to OnFundsLow with a nil run.
+func (f *Fake) TriggerOrgFundsLow(ctx context.Context, orgID string, fields map[string]any) ([]billing.DispatchResult, error) {
+	return f.Deliver(ctx, f.OrgFundsLowPayload(orgID, fields))
 }
 
 // TriggerFundsExhausted delivers billing.funds_exhausted with the given trigger ("" = heartbeat).
