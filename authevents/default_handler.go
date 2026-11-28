@@ -225,7 +225,7 @@ type CreditGrantHooks struct {
 }
 
 // BuildDefaultCreditGrantHandler returns the @idempotent-wrapped handler
-// for org.created / user.org_assigned events. The handler:
+// for the sign-up event (auth.user.registered; v0.3.2 — see DefaultCreditGrantEventTypes). The handler:
 //
 //  1. resolves user/org from event (pin store fallback)
 //  2. resolves tier via TierProvider (REQUIRED, explicit — no Python BUG #1)
@@ -496,14 +496,27 @@ func RegisterMemberJoinedCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHa
 	return h, nil
 }
 
+// DefaultCreditGrantEventTypes (v0.3.2) are the event types RegisterDefaultCreditGrantHandler
+// registers the sign-up handler on: auth.user.registered — the event auth delivers for a new
+// account — and, for the receiver only, the pre-v0.3.2 names (NeverDeliveredLegacyGiftEvents) so a
+// replay, a backfill or a custom relay that still posts them keeps working. Auth never delivers the
+// old names, and the subscription defaults (SubscribeOnStartup, quotactl subscribe-events) never ask
+// for them.
+var DefaultCreditGrantEventTypes = append([]string{EventUserRegistered}, NeverDeliveredLegacyGiftEvents...)
+
 // RegisterDefaultCreditGrantHandler builds + registers the default handler
-// on the events the credit-grant lifecycle observes.
+// on the events the credit-grant lifecycle observes (DefaultCreditGrantEventTypes).
+//
+// v0.3.2: it now listens on auth.user.registered. Before, it listened only on "org.created" and
+// "user.org_assigned", which auth never delivers to a webhook — the documented sign-up gift never
+// arrived.
 func RegisterDefaultCreditGrantHandler(deps CreditGrantDeps) (*IdempotentHandler, error) {
 	h, err := BuildDefaultCreditGrantHandler(deps)
 	if err != nil {
 		return nil, err
 	}
-	OnAuthEvent("org.created", h)
-	OnAuthEvent("user.org_assigned", h)
+	for _, t := range DefaultCreditGrantEventTypes {
+		OnAuthEvent(t, h)
+	}
 	return h, nil
 }

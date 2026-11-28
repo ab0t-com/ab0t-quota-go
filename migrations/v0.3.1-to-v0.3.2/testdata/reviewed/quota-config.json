@@ -1,0 +1,11 @@
+{
+  "_comment": "quotago:v0.3.2-reviewed-file",
+  "service_name": "example-render",
+  "storage": {"redis_url": "memory://"},
+  "enforcement": {"enabled": true},
+  "tier_provider": {"type": "mesh", "default_tier": "free"},
+  "tiers": [
+    {"tier_id": "free", "display_name": "Free", "billing_model": "capacity_only",
+     "credit_grant": {"trigger": "signup", "amount_per_period": "5", "lifecycle": "persistent", "destination": "credit_balance", "reset_on_downgrade": false}}
+  ]
+}

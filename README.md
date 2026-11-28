@@ -33,8 +33,8 @@ Every subsystem reports whether it is on and why in `q.Capabilities()`, and
 ## Install (pin a version)
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.3.1
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.1   # the CLI
+go get github.com/ab0t-com/ab0t-quota-go@v0.3.2
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.2   # the CLI
 ```
 
 Pre-1.0: read the [CHANGELOG](CHANGELOG.md) (and `migrations/` when present)
@@ -203,9 +203,19 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
 - Mount the receiver at the path you register with auth. Since v0.1.10 it
   answers any path ending in `/_webhooks/auth`, so the full-path mount above, a
   subtree mount and `http.StripPrefix("/api/quotas", …)` all work.
-- Register once, loudly: `quotactl subscribe-events --events org.created,user.org_assigned`
-  (exits non-zero on any failure). `Options.AutoSubscribeAuthEvents` re-checks at
-  every boot, best-effort.
+- **Which event carries a sign-up (read this first).** The auth service delivers
+  `auth.user.registered` for a new account (and `org.member.added`, `org.member.removed`,
+  `auth.user.login`, `auth.agent.suspended`). Since **v0.3.2** the default handler `Setup`
+  registers listens on `auth.user.registered` (plus `org.member.added` when
+  `grant_on_member_joined` is on), and `Capabilities().CreditGrant` is `false` with a reason when
+  no gift can arrive. Before v0.3.2 it listened on `org.created` / `user.org_assigned`, which auth
+  never delivers, so no gift was granted. If you added your own `authevents.OnAuthEvent(
+  "auth.user.registered", h)` as a workaround, remove it after upgrading; while both exist the
+  gift still goes once per person per company.
+- Register the subscription once: `quotactl subscribe-events` (since v0.3.2 it defaults to the
+  gift's events and warns on types auth never delivers; it exits non-zero on any failure, and
+  when an existing subscription lacks the gift's events). `Options.AutoSubscribeAuthEvents`
+  subscribes only to delivered types. `quotactl doctor --money` checks the whole wiring.
 - Rotate the shared secret: deploy with the new value in `AB0T_AUTH_WEBHOOK_SECRET`
   and the old one in `AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS` (both verify), run
   `quotactl subscribe-events --rotate-secret` (auth cannot edit a secret, so this
@@ -221,6 +231,33 @@ mux.Handle("/api/quotas"+authevents.WebhookPath, q.WebhookHandler())
   workspace when the event names it (`data.workspace_org_id`).
 - v0.3.0: `quota.Setup` sends your declared prices (`pricing.products`) to billing once per start, in a
   goroutine (`Capabilities().PriceList`); opt out with `"billing_integration": {"price_list": false}`.
+  `refused(403)` there means billing has not yet bound your `service_name` to your service
+  account; it is not a problem with your key. Ask ab0t support to bind it, and send: the
+  `service_name` from `quota-config.json`, the environment, and your billing consumer account
+  email and key id (`.consumer_account.email` and `.api_key.id` in the file `authsetup connect
+  billing` saved; never the key itself). Until then it is harmless while billing's price check
+  only alerts: usage is still recorded at the rates your events send. A refused list is not
+  retried, so restart the service once support confirms the binding.
+
+### Known gaps in this release (and what to do today)
+
+- **Plan credit and downgrade reset are not executed by the Go runtime.** There is no Stripe
+  webhook proxy in this library, so a `subscription_with_credits` tier's `credit_grant` and its
+  `reset_on_downgrade` are read and validated but nothing acts on them. With payment's default
+  settings, a paid subscription invoice is credited to the customer's cash balance for the amount
+  paid, not as the plan credit you declared. Ask ab0t support how plan credit is handled in your
+  environment before you advertise it.
+- **`credit_grant.trigger: "scheduled_period_start"` is accepted but never fires** (in either
+  runtime). Do not promise a monthly refill that depends on it.
+- **`tier_provider.type: "mesh"` is not wired by `Setup`.** Without a lookup the mesh provider
+  answers your `default_tier` for every org (or, with no `default_tier`, the tier is unresolved
+  and refused with `503`). ab0t auth tokens carry no tier claim, so `jwt` (default claim name
+  `tier`; the Python library's default is `org_tier`) only works when your own auth layer adds
+  the claim. To read the tier from billing today, leave `cache_ttl_seconds` out of the
+  `tier_provider` block and install your own lookup after `Setup` (it should call
+  `GET /billing/{org_id}/tier` with your billing key and cache the answer itself):
+  `q.Provider.(*providers.MeshProvider).SetLookup(yourLookup)`. Reading a customer's org there
+  needs the cross-customer capability on your billing key.
 
 ## Keeping usage correct (self-healing counters)
 

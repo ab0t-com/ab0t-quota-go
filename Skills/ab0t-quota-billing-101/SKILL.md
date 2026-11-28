@@ -191,9 +191,9 @@ synchronously because they're configuration bugs, not transient.
 
 ### "What's a PinStore?"
 
-Stable user→org map. When `auth.user.registered` fires, the user has
-no org yet. When `org.created` fires, the org has no users yet. The
-credit-grant handler needs both. The PinStore records "the first
+Stable user→org map. When `auth.user.registered` fires, the user may have
+no org yet; when `org.member.added` fires, the same user may be joining
+another org. The credit-grant handler needs a stable org for each user. The PinStore records "the first
 billing org observed for this user" and keeps it forever, so the
 second-arriving event can fall back to the pin instead of granting
 credit to the wrong org.

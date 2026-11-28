@@ -60,6 +60,9 @@ type SubscribeResult struct {
 	// could be compared with Secret (constant time; never printed). False means
 	// "could not compare", not "differs".
 	SecretVerified bool
+	// Undelivered (v0.3.2) lists the requested event types auth never delivers to a webhook
+	// (UndeliveredSubscriptionWarning); a handler on them never runs from a real delivery.
+	Undelivered []string
 }
 
 // SubscribeError is a Subscribe failure with an operator-facing remedy.
@@ -103,8 +106,37 @@ func (in *SubscribeInput) resolve() {
 		in.Client = &http.Client{Timeout: 15 * time.Second}
 	}
 	if len(in.EventTypes) == 0 {
-		in.EventTypes = RegisteredEventTypes()
+		// v0.3.2: only the registered types auth DELIVERS. A handler on another type (the receiver
+		// still accepts the pre-v0.3.2 gift names for replays) must not put it in the subscription:
+		// auth refuses a type it does not know and never feeds one it does not deliver. An explicit
+		// EventTypes list is sent as given.
+		registered := RegisteredEventTypes()
+		in.EventTypes = DeliveredOnly(registered)
+		if dropped := UndeliveredEventTypes(registered); len(dropped) > 0 {
+			slog.Info("auth-event subscribe: not subscribing to "+strings.Join(dropped, ", ")+
+				" (auth never delivers them; handlers on them run only on replay/backfill)",
+				"subscribing", in.EventTypes)
+		}
 	}
+}
+
+// LookupSubscription (v0.3.2) finds this service's subscription in auth (the endpoint PublicURL +
+// MountPrefix + "/quotas" + WebhookPath) and returns the event types it listens to; found=false when
+// auth has none for the endpoint. Read-only (needs events.read). For `quotactl doctor --money`.
+func LookupSubscription(ctx context.Context, in SubscribeInput) (eventTypes []string, found bool, err error) {
+	in.resolve()
+	if in.AuthURL == "" || in.AdminToken == "" || in.PublicURL == "" {
+		return nil, false, &SubscribeError{Op: "config", Msg: "not set: AB0T_AUTH_AUTH_URL, AB0T_AUTH_ADMIN_TOKEN " +
+			"and AB0T_AUTH_WEBHOOK_PUBLIC_URL are all needed to read the subscription"}
+	}
+	existing, err := listByEndpoint(ctx, in, in.Endpoint())
+	if err != nil || existing == nil {
+		return nil, false, err
+	}
+	if existing.inactive {
+		return []string{}, true, nil // a disabled subscription delivers nothing
+	}
+	return append([]string{}, existing.eventTypes...), true, nil
 }
 
 // Endpoint returns the receiver URL this input registers with auth:
@@ -164,7 +196,8 @@ func Subscribe(ctx context.Context, in SubscribeInput) (*SubscribeResult, error)
 	if err != nil {
 		return nil, err
 	}
-	res := &SubscribeResult{Endpoint: endpoint, EventTypes: in.EventTypes}
+	res := &SubscribeResult{Endpoint: endpoint, EventTypes: in.EventTypes,
+		Undelivered: UndeliveredEventTypes(in.EventTypes)}
 	if existing != nil {
 		res.SubscriptionID = existing.id
 		if existing.secret != "" {
@@ -385,15 +418,36 @@ func createSubscriptionStatus(ctx context.Context, in SubscribeInput, body map[s
 // SubscribeOnStartup is idempotent: GET first, then POST only on no match.
 // Best-effort — never blocks startup.
 func SubscribeOnStartup(ctx context.Context, in SubscribeInput) (string, error) {
+	id, _, err := SubscribeOnStartupReport(ctx, in)
+	return id, err
+}
+
+// ExistingSubscriptionMissingEventsText is the ERROR both libraries print when auth already has a subscription
+// for this receiver that does not listen to some of the events asked for (shared golden
+// money_safety_golden_20261128.json `existing_subscription_missing_events_template`; fix is the library's command).
+func ExistingSubscriptionMissingEventsText(id string, missing []string, fix string) string {
+	return "auth-event subscription " + id + " exists but does not listen to " + strings.Join(missing, ", ") +
+		": those events never reach this service, so the sign-up gift does not arrive for them. Auth cannot " +
+		"edit a subscription: " + fix
+}
+
+// existingMissingFix is the Go library's fix for ExistingSubscriptionMissingEventsText.
+const existingMissingFix = "run `quotactl subscribe-events --config quota-config.json --rotate-secret` " +
+	"(deletes and re-creates it; then `quotactl backfill` sign-ups from the gap)"
+
+// SubscribeOnStartupReport (v0.3.2) is SubscribeOnStartup that also returns the asked-for event types an
+// EXISTING subscription does not listen to (nil when it listens to all of them, or when one was created).
+// An existing subscription is never changed here: auth cannot edit one, and deleting it is an operator step.
+func SubscribeOnStartupReport(ctx context.Context, in SubscribeInput) (string, []string, error) {
 	in.resolve()
 	if len(in.EventTypes) == 0 {
 		slog.Info("auth-event auto-subscribe skipped: no handlers registered")
-		return "", nil
+		return "", nil, nil
 	}
 	if in.AuthURL == "" || in.AdminToken == "" || in.PublicURL == "" || in.Secret == "" {
 		slog.Info("auth-event auto-subscribe skipped: missing one of " +
 			"AB0T_AUTH_AUTH_URL, AB0T_AUTH_ADMIN_TOKEN, AB0T_AUTH_WEBHOOK_PUBLIC_URL, AB0T_AUTH_WEBHOOK_SECRET")
-		return "", nil
+		return "", nil, nil
 	}
 
 	endpoint := in.Endpoint()
@@ -426,8 +480,25 @@ func SubscribeOnStartup(ctx context.Context, in SubscribeInput) (string, error) 
 				"than AB0T_AUTH_WEBHOOK_SECRET — every event will be rejected with 401. Rotate with "+
 				"`quotactl subscribe-events --rotate-secret`", "id", existing.id)
 		}
+		var missing []string
+		for _, t := range in.EventTypes {
+			found := false
+			for _, have := range existing.eventTypes {
+				if have == t {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = append(missing, t)
+			}
+		}
+		if len(missing) > 0 {
+			slog.Error(ExistingSubscriptionMissingEventsText(existing.id, missing, existingMissingFix))
+			return existing.id, missing, nil
+		}
 		slog.Info("auth-event auto-subscribe: already subscribed", "id", existing.id)
-		return existing.id, nil
+		return existing.id, nil, nil
 	}
 
 	// Create.
@@ -446,11 +517,11 @@ func SubscribeOnStartup(ctx context.Context, in SubscribeInput) (string, error) 
 	}
 	if err != nil {
 		slog.Warn("auth-event auto-subscribe: create failed", "err", err)
-		return "", nil
+		return "", nil, nil
 	}
 	slog.Info("auth-event auto-subscribe: created",
 		"id", id, "events", in.EventTypes, "endpoint", endpoint)
-	return id, nil
+	return id, nil, nil
 }
 
 // resolveOrgIDFromSlug scrapes the public hosted-login HTML for window.__AUTH_CONFIG__.orgId.

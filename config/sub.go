@@ -51,9 +51,10 @@ type StorageConfig struct {
 
 // EnforcementConfig governs runtime enforcement behavior.
 //
-// shadow_mode and global_kill_switch are present in some real configs but
-// the Python lib never reads them (Known Upstream Bug #4). The Go port
-// honors shadow_mode (check-and-log-but-allow).
+// Both libraries honor shadow_mode (check-and-log-but-allow: engine/engine.go;
+// Python engine.py) and global_kill_switch (deny everything: engine/engine.go,
+// engine/activation.go; Python engine.py). The old note "the Python lib never
+// reads them (Known Upstream Bug #4)" was stale (corrected v0.3.2, finding C21).
 type EnforcementConfig struct {
 	Enabled          bool `json:"enabled"`
 	ShadowMode       bool `json:"shadow_mode,omitempty"`

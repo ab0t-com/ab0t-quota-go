@@ -1,0 +1,12 @@
+{
+  "service_name": "example-render",
+  "storage": {"redis_url": "memory://"},
+  "enforcement": {"enabled": true},
+  "tier_provider": {"type": "jwt", "default_tier": "free"},
+  "tiers": [
+    {"tier_id": "free", "display_name": "Free", "billing_model": "free_tier",
+     "credit_grant": {"trigger": "signup", "amount_per_period": "5", "lifecycle": "persistent", "destination": "credit_balance", "reset_on_downgrade": false}},
+    {"tier_id": "studio", "display_name": "Studio",
+     "credit_grant": {"trigger": "scheduled_period_start", "amount_per_period": "20", "lifecycle": "use_it_or_lose_it", "destination": "credit_balance", "reset_on_downgrade": true}}
+  ]
+}

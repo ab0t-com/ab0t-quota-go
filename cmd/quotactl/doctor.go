@@ -245,6 +245,7 @@ func newDoctorCmd() *cobra.Command {
 	var configPath string
 	var jsonOut, failOnRisk bool
 	var timeoutSec float64
+	var money moneyFlags // v0.3.2: doctor --money
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Grade production POSTURE over the boot evaluators; honest about what it cannot check",
@@ -261,6 +262,13 @@ doctor's only write is a SCRIPT LOAD; each runtime states its own.`,
 			ctx, cancel := context.WithTimeout(context.Background(),
 				time.Duration(timeoutSec*float64(time.Second)))
 			defer cancel()
+			if money.on {
+				// v0.3.2: the money-safety checklist — no Setup, contacts nothing unless --live.
+				if code := runDoctorMoney(ctx, cmd, configPath, jsonOut, failOnRisk, money); code != exitOK {
+					os.Exit(code)
+				}
+				return nil
+			}
 			cfg, err := config.LoadConfig(configPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "CONFIG ERROR — nothing was contacted:", err)
@@ -343,5 +351,6 @@ doctor's only write is a SCRIPT LOAD; each runtime states its own.`,
 	cmd.Flags().BoolVar(&failOnRisk, "fail-on-risk", false,
 		"RISK posture findings fail the exit code (advice by default)")
 	cmd.Flags().Float64Var(&timeoutSec, "timeout", 15, "overall Setup timeout seconds")
+	addMoneyFlags(cmd, &money)
 	return cmd
 }

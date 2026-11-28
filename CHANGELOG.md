@@ -3,6 +3,89 @@
 All notable changes to `ab0t-quota-go`. Semantic versioning: a change that
 requires you to do something to keep working is at least a MINOR.
 
+## [0.3.2] — 2026-11-28
+
+The library tells you on day one when your setup cannot move money the way your config says. A PATCH:
+your code compiles unchanged, nothing was removed, and nothing you configured changes meaning. The fixes
+make documented behaviour happen; everything else is a warning, a capability value or a new check. Same
+contract as the Python `ab0t-quota` 0.7.3 (shared vectors `testdata/billing_models_golden_20261128.json`,
+`testdata/money_safety_golden_20261128.json`). Read
+[`migrations/v0.3.1-to-v0.3.2/`](migrations/v0.3.1-to-v0.3.2/CLIENT_NOTICE.md) (a copy-paste notice and a
+read-only checker).
+
+### Fixed
+
+- **The default sign-up gift listens on the event auth delivers.** It listened only on `org.created` and
+  `user.org_assigned`; auth sends `org.created` to its audit trail only and has no `user.org_assigned`
+  event, so a gift wired as documented never arrived. It now listens on `auth.user.registered` (the old
+  names stay registered for replays and backfills; they are never subscribed to). **Once your
+  subscription names `auth.user.registered`, gifts start arriving** — once per person per company.
+- **`quotactl subscribe-events` and `AutoSubscribeAuthEvents` subscribe to the events auth delivers:**
+  `auth.user.registered`, plus `org.member.added` when the config sets `auth_events.grant_on_member_joined`
+  (new `--config`; `--events` still overrides, with a warning for a type auth never delivers). An existing
+  subscription on the old names now makes the command fail and name `--rotate-secret`.
+- **`tier_provider` `"mesh"` reads billing's tier for each org** (`GET /billing/{org_id}/tier`, your
+  billing key), as the Python library does. It had no lookup, so every org got `default_tier`. A failed
+  lookup serves last-known-good, else `default_tier` (never cached); a 60 s cache is used when
+  `cache_ttl_seconds` is unset (the Python default). With no billing wired it says so at startup
+  (`WhyOff["tier_provider"]`).
+- **A price list refused with 403 is retried, rarely, and the message says what it means.** A 403 means
+  billing has not bound your service name to your account yet — not a key problem. Retried every 6 h,
+  at most 28 times (one week), then stops until restart; `Capabilities().PriceList` reads
+  `refused(403: billing has not bound this service name to your account yet — …; retrying every 6h)`.
+  Other refusals are unchanged.
+
+### Changed
+
+- **`Capabilities().CreditGrant` is false when no gift can arrive** — `AB0T_AUTH_WEBHOOK_SECRET` unset
+  (every event is rejected), or auto-subscribe neither created nor found a subscription — with the cause
+  in `WhyOff["credit_grant"]`. New `CreditGrantEvents` (the delivered events the gift listens on) and
+  `CreditGrantSubscription` (`subscribed(<id>)` / `pending` / `not verified (…)` / `OFF — …`).
+- **One default JWT claim in both libraries: `org_tier`** (it was `tier` here). With no `jwt_claim_key`
+  the old `tier` claim is still read, after `org_tier`; once Setup knows your tiers, only when it names
+  one of them. Startup warns that tokens issued by the ab0t auth service carry no tier claim; the first
+  token without the claim logs once.
+
+### Added
+
+- **One `billing_model` name set with the Python library:** `capacity_only` (= absent; limits only) and
+  the Python experimental names `metered`, `seat_based`, `subscription_with_overage` are known. The
+  aliases `free_tier`, `enterprise` (→ `capacity_only`) and `metered_billing` (→ `metered`) keep working
+  with a startup warning naming the canonical name. The three Python-only experimental names still boot
+  here (as limits only) with a warning; the Python library refuses them without
+  `AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS=true`, and this library will too from its next minor.
+- A startup warning for a `credit_grant` with trigger `scheduled_period_start` (accepted, never fired).
+- **`quotactl doctor --money`** — the money-safety checklist (paid mode, price list, gift events, the
+  tier a paying org resolves to with `--live --org --expect-tier`, billing models for this runtime, dev
+  escapes in production, negative balance, gifts that failed for good). No Setup; contacts nothing
+  without `--live`. Unknown is `not_checked`, never `good`. In-process: `q.MoneyChecklist(ctx, extra)`
+  sees the capabilities and the handler ledger.
+- `authevents.DeliveredEventTypes`, `SignupGiftEventTypes`, `UndeliveredEventTypes`,
+  `UndeliveredSubscriptionWarning`, `LookupSubscription`, `EventUserRegistered`,
+  `DefaultCreditGrantEventTypes`; `billing.(*Client).GetOrgTier`; `providers.ResolveJWTTier`,
+  `DefaultJWTClaimKey`; `config.BillingModelAliases`, `BillingModel.Canonical` / `IsKnown`;
+  `quota.MoneyChecklist`, `MoneyFacts`, `ConfigDocument`.
+
+### Fixed (late, before the cut)
+
+- **`AutoSubscribeAuthEvents` no longer reports an existing subscription as done when it does not listen to the
+  gift's events** (e.g. one made from the v0.3.1 docs on `org.created` / `user.org_assigned`). It logs an ERROR
+  naming the missing types and `quotactl subscribe-events --config quota-config.json --rotate-secret`;
+  `Capabilities().CreditGrant` is `false` and `CreditGrantSubscription` / `WhyOff["credit_grant"]` say why. The
+  existing subscription is never changed. New: `authevents.SubscribeOnStartupReport` (`id, missing, err`) and
+  `ExistingSubscriptionMissingEventsText`; `SubscribeOnStartup` keeps its signature and behaviour.
+
+### Docs
+
+- README, CONSUMING, INTEGRATION_RUNBOOK, PAYMENT_PIPELINE, ARCHITECTURE and the bundled `Skills/` say the
+  gift listens on `auth.user.registered` (the v0.3.1 "register it yourself" workaround is gone; remove it
+  after upgrading — while both exist the gift still goes once). Install pins and the prebuilt-binary
+  example name v0.3.2.
+- The 403 text and `doctor --money`'s fix name `authsetup status` (authsetup 0.5.31 prints the support
+  reference to quote). The client notice carries an erratum for the v0.3.0 notice's 404 claim.
+- `config/sub.go`: the comment saying Python ignores `shadow_mode` / `global_kill_switch` was wrong;
+  both libraries honour both.
+
 ## [0.3.1] — 2026-11-27
 
 A PATCH: your code compiles unchanged, no setting changed, and `CreditGrantRequest.IdempotencyKey` (what

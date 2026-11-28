@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ab0t-com/ab0t-quota-go/authevents"
+	"github.com/ab0t-com/ab0t-quota-go/config"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +19,7 @@ func newSubscribeCmd() *cobra.Command {
 		mountPrefix  string
 		name         string
 		rotateSecret bool
+		configPath   string
 	)
 	cmd := &cobra.Command{
 		Use:   "subscribe-events",
@@ -45,11 +47,9 @@ sign-ups in that window. Remove AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS afterwards.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			var types []string
-			for _, t := range strings.Split(eventTypes, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					types = append(types, t)
-				}
+			types := subscribeEventTypes(cmd, eventTypes, configPath)
+			if bad := authevents.UndeliveredEventTypes(types); len(bad) > 0 {
+				fmt.Fprintln(cmd.ErrOrStderr(), "WARNING:", authevents.UndeliveredSubscriptionWarning(types))
 			}
 			res, err := authevents.Subscribe(ctx, authevents.SubscribeInput{
 				EventTypes:   types,
@@ -78,8 +78,14 @@ sign-ups in that window. Remove AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS afterwards.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&eventTypes, "events", "org.created,user.org_assigned",
-		"comma-separated event types")
+	// v0.3.2: the default is the events auth DELIVERS for the sign-up gift — auth.user.registered,
+	// plus org.member.added when the config sets auth_events.grant_on_member_joined. It was
+	// "org.created,user.org_assigned", which auth never delivers: the gift never arrived.
+	cmd.Flags().StringVar(&eventTypes, "events", "",
+		"comma-separated event types (default: auth.user.registered, plus org.member.added when the "+
+			"config sets auth_events.grant_on_member_joined)")
+	cmd.Flags().StringVar(&configPath, "config", "",
+		"quota-config.json for the default events (default: $QUOTA_CONFIG_PATH, then ./quota-config.json)")
 	cmd.Flags().StringVar(&orgSlug, "org-slug", "", "filter to org by login slug")
 	cmd.Flags().StringVar(&orgID, "org-id", "", "filter to org_id directly")
 	cmd.Flags().StringVar(&mountPrefix, "prefix", "/api", "API mount prefix")
@@ -87,4 +93,28 @@ sign-ups in that window. Remove AB0T_AUTH_WEBHOOK_SECRET_PREVIOUS afterwards.`,
 	cmd.Flags().BoolVar(&rotateSecret, "rotate-secret", false,
 		"replace an existing subscription (delete + create) with the current secret and --events")
 	return cmd
+}
+
+// subscribeEventTypes (v0.3.2): --events when given; else the sign-up gift's delivered events for the
+// config (auth.user.registered, + org.member.added when auth_events.grant_on_member_joined). A config
+// that cannot be read is said, not guessed: the default without the member-joined event is used.
+func subscribeEventTypes(cmd *cobra.Command, eventsFlag, configPath string) []string {
+	var types []string
+	for _, t := range strings.Split(eventsFlag, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			types = append(types, t)
+		}
+	}
+	if len(types) > 0 {
+		return types
+	}
+	memberJoined := false
+	if cfg, err := config.LoadConfig(configPath); err == nil {
+		memberJoined = cfg.AuthEvents.GrantOnMemberJoined
+	} else {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: no readable quota config ("+err.Error()+"); subscribing to "+
+			authevents.EventUserRegistered+" only — pass --config, or --events "+authevents.EventUserRegistered+","+
+			authevents.EventMemberJoined+" if your config sets auth_events.grant_on_member_joined")
+	}
+	return authevents.SignupGiftEventTypes(memberJoined)
 }

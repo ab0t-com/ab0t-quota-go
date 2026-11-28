@@ -1,11 +1,46 @@
 # Billing Models Guide
 
 Every billing relationship you might want, expressed as a
-`quota-config.json` block. Ported from the Python ab0t-quota guide;
-config is wire-compatible across runtimes.
+`quota-config.json` block. Ported from the Python ab0t-quota guide.
+The file format is shared with the Python library, but the two runtimes
+do not accept exactly the same values and do not execute the same
+paths. Read the next section before you rely on a model.
 
 Read [BILLING_GLOSSARY.md](BILLING_GLOSSARY.md) first if any term
 below feels foreign.
+
+## What this Go runtime executes today (read first)
+
+- **`billing_model` names differ per runtime.** This library knows
+  `consumption_only`, `subscription_unlock_only`,
+  `subscription_with_credits`, `free_tier`, `enterprise`, and the
+  experimental `metered_billing` / `one_time_purchase` (refused unless
+  `AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS=true`). The Python
+  library knows `capacity_only` (its default), `consumption_only`,
+  `subscription_with_credits`, `subscription_unlock_only` (plus
+  experimental `subscription_with_overage`, `seat_based`, `metered`).
+  Only the three shared names load in both. A name Go does not know
+  loads with a startup warning and none of its rules apply; a name
+  Python does not know is refused when the file loads. For a file used
+  by both runtimes, leave `billing_model` out on free and enterprise
+  tiers.
+- **Lifecycle and destination:** Go knows `persistent`,
+  `use_it_or_lose_it`, `rollover_capped` and the destinations
+  `credit_balance`, `subscription_credit`. `rollover_unlimited` and
+  `balance` exist only in the Python library; Go warns at startup that
+  billing refuses such a grant.
+- **Plan credit (`subscription_with_credits`) is not executed by this
+  runtime.** The library has no Stripe webhook proxy, so nothing here
+  grants a tier's `credit_grant` when a subscription invoice is paid,
+  and nothing acts on `reset_on_downgrade`. With payment's default
+  settings a paid subscription invoice is credited to the customer's
+  cash balance for the amount paid, not as the declared plan credit.
+  Ask ab0t support how plan credit runs in your environment before you
+  sell a plan that depends on it.
+- **`trigger: "scheduled_period_start"` is accepted but never fires**
+  (in either runtime).
+- **Sign-up gifts:** only `trigger: "signup"` grants on auth events; see
+  the README for the event to register (`auth.user.registered`).
 
 ---
 
@@ -50,8 +85,8 @@ When you call `quota.Setup(ctx, opts)`:
 - **Credit grants** — when an auth event resolves to a tiered user,
   the library calls your `CreditGranter`; you in turn call billing
   to land the grant.
-- **Tier-change side effects** — on downgrade, the previous tier's
-  `subscription_credit` is reset (configurable per tier).
+- **Tier-change side effects** — `reset_on_downgrade` is read and
+  validated, but this runtime does not act on it today (see above).
 - **Top-up** — payment-service handles Stripe Checkout for
   `account_funding`; balance flows through ab0t-billing.
 
@@ -79,7 +114,7 @@ When you call `quota.Setup(ctx, opts)`:
 | `tier_id` | string | yes | Stable identifier; lowercase snake_case |
 | `display_name` | string | yes | Shown to users |
 | `sort_order` | int | yes | Free=0; paid tiers ascending. Used for downgrade detection |
-| `billing_model` | enum | no (default `consumption_only`) | See list below |
+| `billing_model` | enum | no (Go: no default, no rules apply when omitted; Python: `capacity_only`) | Names differ per runtime (see the top) |
 | `price` | object | for subscription models | `amount_per_period`, `currency`, `period` |
 | `credit_grant` | object | for credit-bearing tiers | See lifecycle table |
 | `limits` | object | yes | resource_key → number or full TierLimit |
@@ -221,7 +256,10 @@ Paid, Anthropic Pro.
 }
 ```
 
-### Variant — unlimited rollover
+### Variant — unlimited rollover (Python runtime only)
+
+Go does not know `rollover_unlimited`: it warns at startup and billing
+refuses the grant.
 
 ```jsonc
 "credit_grant": {
@@ -290,9 +328,11 @@ Example: Twilio Voice, GitHub Actions, Vercel.
 }
 ```
 
-Library accepts the declaration. Off-session Stripe charging is wired
-through payment-service. Use this archetype when you want a soft
-upper boundary instead of a hard 429.
+Not available in this runtime: Go does not know
+`subscription_with_overage` (it loads with a warning and nothing acts
+on it). In the Python library it is experimental, refused unless
+`AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS=true`, and has no runtime
+path yet. Kept here as the design target.
 
 ---
 
@@ -313,9 +353,11 @@ Notion, Linear.
 }
 ```
 
-Library tracks `default_per_user_fraction` for splitting org-level
-quotas across seats. Stripe `quantity` sync wires through payment-
-service; the library reads the resulting tier_id from the mesh.
+Per-seat *limits* work today (a gauge plus `per_user_limit` or
+`default_per_user_fraction`). Per-seat *pricing* does not: Go does not
+know `seat_based` (warning, no effect), it is experimental with no
+runtime path in the Python library, and Stripe `quantity` sync is not
+wired. Kept here as the design target.
 
 ---
 
@@ -407,7 +449,7 @@ If you declare only `tier_id`, `display_name`, `sort_order`, and
 
 | Field | Default | Means |
 |-------|---------|-------|
-| `billing_model` | `consumption_only` | No subscription side-effects |
+| `billing_model` | none in Go (Python: `capacity_only`) | No cross-field rules apply |
 | `price` | none | Free tier |
 | `credit_grant` | none | No grants fire |
 | In `credit_grant`, `lifecycle` | `use_it_or_lose_it` | Consumer-SaaS norm |
@@ -429,12 +471,12 @@ expectation; override per-tier as needed.
 
 1. **payment-service** must set
    `subscription_data.metadata = {"org_id": ..., "plan_id": ...}` on
-   Stripe Checkout sessions
-2. **ab0t-quota-go** must receive paid-invoice events
-   (`invoice.paid`, `invoice.payment_succeeded`) routed through auth's
-   event system
-3. **Your `CreditGranter`** must call `q.Billing.GrantCredit(...)`
-   with the right org/tier/amount
+   Stripe Checkout sessions (its checkout endpoints do)
+2. **The tier**: payment maps the paid Stripe price to a tier and sets
+   it in billing; ask ab0t support to add your price ids to that map.
+3. **Plan credit**: not executed by this Go runtime (see the top).
+   Paid-invoice events are Stripe events; auth does not deliver them,
+   and your `CreditGranter` is only called for sign-up gifts.
 
 ### For any model with `credit_grant`
 
@@ -443,9 +485,7 @@ expectation; override per-tier as needed.
 
 ### For downgrade reset
 
-5. **Your service** must propagate tier changes (this typically
-   happens automatically via Stripe → payment-service → auth's tier
-   mesh)
+5. Not executed by this Go runtime today (see the top).
 
 ### For top-up (Archetype B / D)
 
@@ -460,7 +500,8 @@ expectation; override per-tier as needed.
 
 ### "My tier upgrade isn't granting credit"
 
-Check that:
+On this Go runtime that is expected today: plan credit is not executed
+(see the top). Where a plan-credit path is set up for you, check that:
 1. The Plan in payment-service has the right `plan_id` set at checkout
 2. `subscription_data.metadata.org_id` is populated
 3. Your `quota-config.json` tier has
@@ -473,7 +514,8 @@ Check that:
 
 ### "Downgrade isn't resetting subscription_credit"
 
-Check that:
+Expected on this Go runtime today (see the top). Where a reset path is
+set up for you, check that:
 1. The old tier has `credit_grant.reset_on_downgrade: true` (default)
 2. `sort_order` is set on both tiers and new < old
 3. The recorded `subscription_credit_source_tier` matches the old tier
@@ -513,14 +555,17 @@ The deprecated form:
 "initial_credit": "10.00"
 ```
 
-Is auto-synthesized into:
+Is auto-synthesized (by both runtimes) into:
 
 ```jsonc
 "credit_grant": {
   "trigger": "signup",
   "amount_per_period": "10.00",
-  "lifecycle": "use_it_or_lose_it",
-  "destination": "subscription_credit"
+  "lifecycle": "persistent",
+  "destination": "credit_balance",
+  "dedup": "per_user_per_tier",
+  "reset_on_downgrade": false,
+  "reset_on_upgrade": false
 }
 ```
 

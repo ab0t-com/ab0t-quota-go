@@ -11,7 +11,7 @@ Eight subcommands. Each takes `--help` for full flags.
 
 ```bash
 # Option 1 — from source (needs Go toolchain)
-go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.1
+go install github.com/ab0t-com/ab0t-quota-go/cmd/quotactl@v0.3.2
 
 # Option 2 — download prebuilt
 VERSION=v0.1.10
@@ -31,7 +31,7 @@ Verify the SHA256SUMS from the same release if you care about supply chain.
 
 ```bash
 quotactl subscribe-events \
-  --events org.created,user.org_assigned \
+  --events auth.user.registered \
   --prefix /api \
   --name my-service-credit-grant
 ```

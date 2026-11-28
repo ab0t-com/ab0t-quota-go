@@ -157,21 +157,27 @@ type Quota struct {
 // Capabilities reports which subsystems are wired ("on") and why. Emitted
 // at Setup time as a single structured log line and accessible via Q.Capabilities().
 type Capabilities struct {
-	Engine        bool   // always true
-	Enforcement   bool   // config.Enforcement.Enabled
-	ShadowMode    bool   // config.Enforcement.ShadowMode
-	Billing       bool   // billing client wired
-	Payment       bool   // payment client wired
-	Alerts        bool   // alerts manager dispatching
-	AlertsWebhook bool   // webhook dispatcher wired
-	AuthEvents    bool   // receiver routable
-	CreditGrant   bool   // default credit-grant handler registered
-	AutoSubscribe bool   // SubscribeOnStartup will fire
-	LedgerBackend string // "memory" | "redis" | "ddb" (self-reported by the store — QG-02)
-	FloatStore    string // "memory" | "redis"
-	Outbox        string // "off" | "none" | "DDB" | "Redis (...)" | "NON-DURABLE (...)"  (D-44)
-	BillingStatus string // "OFF (paid disabled)" | "ON (chain complete: ...)" | "OFF — <weakest link>"
-	Reconciler    string // "ON" | "OFF — <reason>" (D-62/D-39/D-51: absence is OFF, not healthy)
+	Engine        bool // always true
+	Enforcement   bool // config.Enforcement.Enabled
+	ShadowMode    bool // config.Enforcement.ShadowMode
+	Billing       bool // billing client wired
+	Payment       bool // payment client wired
+	Alerts        bool // alerts manager dispatching
+	AlertsWebhook bool // webhook dispatcher wired
+	AuthEvents    bool // receiver routable
+	CreditGrant   bool // default credit-grant handler registered AND able to receive (v0.3.2: false with WhyOff["credit_grant"] when no gift can arrive)
+	AutoSubscribe bool // SubscribeOnStartup will fire
+	// CreditGrantEvents (v0.3.2) are the delivered event types the sign-up gift listens on.
+	CreditGrantEvents []string
+	// CreditGrantSubscription (v0.3.2) is what is known about auth's subscription for the receiver:
+	// "subscribed(<id>)" | "pending (auto-subscribe running)" | "OFF — …" | "not verified (…)".
+	// Never "on" for a subscription nobody checked.
+	CreditGrantSubscription string
+	LedgerBackend           string // "memory" | "redis" | "ddb" (self-reported by the store — QG-02)
+	FloatStore              string // "memory" | "redis"
+	Outbox                  string // "off" | "none" | "DDB" | "Redis (...)" | "NON-DURABLE (...)"  (D-44)
+	BillingStatus           string // "OFF (paid disabled)" | "ON (chain complete: ...)" | "OFF — <weakest link>"
+	Reconciler              string // "ON" | "OFF — <reason>" (D-62/D-39/D-51: absence is OFF, not healthy)
 	// RedisTopology is the D-71 machine-checked verdict on the client's Redis:
 	// "single-node[ (…assertion…)]" | "CLUSTER (unsupported)" | "unknown" | "n/a (no redis counter store)".
 	// Setup REFUSES to start on anything but single-node/n-a; the field exists so the
@@ -301,9 +307,28 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quota.Setup: tier provider: %w", err)
 	}
+	// v0.3.2 — the tier source must be able to see a paying customer. "mesh" is wired to billing
+	// below (it had no lookup before, so every org got default_tier); "jwt" learns the config's
+	// tiers (its legacy-claim guard) and says at startup that ab0t-issued tokens carry no tier.
+	meshProv, _ := prov.(*providers.MeshProvider)
+	if jp, ok := prov.(*providers.JWTProvider); ok {
+		jp.KnownTiers = map[string]bool{}
+		for _, t := range cfg.Tiers {
+			jp.KnownTiers[t.TierID] = true
+		}
+		w := providers.JWTStartupWarning(jp.ClaimKey, cfg.TierProvider.DefaultTier)
+		cap.ConfigWarnings = append(cap.ConfigWarnings, w)
+		slog.Warn("quota config: " + w)
+	}
+	cacheTTL := time.Duration(cfg.TierProvider.CacheTTLSec) * time.Second
+	if meshProv != nil && cacheTTL <= 0 {
+		// The Python library's default (cache_ttl_seconds 60): a billing lookup per request would be a
+		// hot path, and the cache is what serves last-known-good on a billing blip.
+		cacheTTL = 60 * time.Second
+	}
 	var tierCache *providers.Cache
-	if cfg.TierProvider.CacheTTLSec > 0 {
-		tierCache = providers.WithCache(prov, time.Duration(cfg.TierProvider.CacheTTLSec)*time.Second)
+	if cacheTTL > 0 {
+		tierCache = providers.WithCache(prov, cacheTTL)
 		prov = tierCache
 	}
 
@@ -540,6 +565,27 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	} else {
 		cap.WhyOff["billing"] = mesh.EnvBillingServiceURL + " not set (deprecated name: " + mesh.EnvBillingURL + ")"
 	}
+	// v0.3.2 — tier_provider "mesh" reads billing's tier for the org (GET /billing/{org_id}/tier with
+	// the billing key), as the Python library does. A lookup failure serves last-known-good (the
+	// cache), else default_tier uncached — never a cached invented tier.
+	if meshProv != nil {
+		if q.Billing != nil {
+			bc := q.Billing
+			meshProv.SetLookup(func(ctx context.Context, _, orgID string) (string, error) {
+				return bc.GetOrgTier(ctx, orgID)
+			})
+			slog.Info("tier provider: mesh — billing's tier for each org (GET /billing/{org_id}/tier)")
+		} else {
+			why := `tier_provider "mesh" cannot reach billing (` + mesh.EnvBillingServiceURL + ` / ` +
+				mesh.EnvBillingServiceAPIKey + ` not set): every customer resolves to default_tier "` +
+				cfg.TierProvider.DefaultTier + `", paying or not — set ` + mesh.EnvBillingServiceURL +
+				`=https://billing.service.ab0t.com and ` + mesh.EnvBillingServiceAPIKey +
+				` (the key ` + "`authsetup connect billing`" + ` prints)`
+			cap.WhyOff["tier_provider"] = why
+			cap.ConfigWarnings = append(cap.ConfigWarnings, why)
+			slog.Warn("quota config: " + why)
+		}
+	}
 	if mu.Payment != "" {
 		c, err := payment.New(mu)
 		if err == nil {
@@ -732,8 +778,9 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 		// registry; Close removes it, so a second Setup (or a closed Quota) never
 		// leaves a stale handler — old config, old granter — running on events.
 		q.closeFns = append(q.closeFns, func() error {
-			authevents.UnregisterHandler("org.created", h)
-			authevents.UnregisterHandler("user.org_assigned", h)
+			for _, t := range authevents.DefaultCreditGrantEventTypes {
+				authevents.UnregisterHandler(t, h)
+			}
 			return nil
 		})
 		if cfg.AuthEvents.GrantOnMemberJoined {
@@ -748,16 +795,42 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 			slog.Info("auth-event: member-joined sign-up gift ON (auth_events.grant_on_member_joined) — " +
 				authevents.EventMemberJoined + " gets the gift once per person; subscribe your webhook to it")
 		}
+		// v0.3.2 — honest capability: "on" only when a gift can actually arrive. The handler listens
+		// on the delivered events (CreditGrantEvents); a receiver that rejects every event (no secret)
+		// is OFF, and the subscription's state is reported, never assumed.
+		cap.CreditGrantEvents = authevents.SignupGiftEventTypes(cfg.AuthEvents.GrantOnMemberJoined)
 		cap.CreditGrant = true
+		switch {
+		case secret == "" && len(previous) == 0:
+			cap.CreditGrant = false
+			cap.WhyOff["credit_grant"] = "AB0T_AUTH_WEBHOOK_SECRET not set — the receiver rejects every auth event " +
+				"(401), so no sign-up gift can arrive"
+			slog.Error("SIGN-UP GIFT OFF: a CreditGranter is wired but AB0T_AUTH_WEBHOOK_SECRET is not set — " +
+				"every auth event is rejected; set it to the subscription's secret")
+		case opts.AutoSubscribeAuthEvents:
+			cap.CreditGrantSubscription = "pending (auto-subscribe running)"
+		default:
+			cap.CreditGrantSubscription = "not verified (AutoSubscribeAuthEvents is off): subscribe with " +
+				"`quotactl subscribe-events` and check with `quotactl doctor --money --live`"
+		}
 	} else {
 		cap.WhyOff["credit_grant"] = "no CreditGranter supplied; default handler not registered"
 	}
+	// v0.3.2 — a handler on a type auth never delivers runs only on replay/backfill: say so once.
+	// (The default handler's own pre-v0.3.2 names are registered on purpose, for replays.)
+	for _, t := range authevents.UndeliveredEventTypes(authevents.RegisteredEventTypes()) {
+		for _, hh := range authevents.DefaultRegistry().Handlers(t) {
+			if ih, ok := hh.(*authevents.IdempotentHandler); ok && ih.Inner().Config.Handler == "default_credit_grant" {
+				continue
+			}
+			slog.Warn("auth-event: " + authevents.UndeliveredSubscriptionWarning([]string{t}))
+			break
+		}
+	}
 
 	if opts.AutoSubscribeAuthEvents {
+		// Started once the capabilities are published (end of Setup), so its result is not overwritten.
 		cap.AutoSubscribe = true
-		go func() {
-			_, _ = authevents.SubscribeOnStartup(context.Background(), authevents.SubscribeInput{})
-		}()
 	}
 
 	// D-39 — the activation ledger is authoritative for identity + cost, so it
@@ -876,7 +949,63 @@ func Setup(ctx context.Context, opts Options) (*Quota, error) {
 	if plBody != nil {
 		q.startPriceListPublisher(q.Billing, plService, plBody, plVersion)
 	}
+	if cap.AutoSubscribe {
+		go q.autoSubscribe()
+	}
 	return q, nil
+}
+
+// autoSubscribe runs SubscribeOnStartup and records what it learned about the sign-up gift's
+// subscription (v0.3.2): subscribed, OFF (auth refused or nothing was created), or not verified
+// (the AB0T_AUTH_* env it needs is missing — a subscription made by hand may still exist).
+func (q *Quota) autoSubscribe() {
+	var missing []string
+	for _, k := range []string{"AB0T_AUTH_AUTH_URL", "AB0T_AUTH_ADMIN_TOKEN", "AB0T_AUTH_WEBHOOK_PUBLIC_URL", "AB0T_AUTH_WEBHOOK_SECRET"} {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	id, lacking, _ := authevents.SubscribeOnStartupReport(context.Background(), authevents.SubscribeInput{})
+	q.capMu.Lock()
+	defer q.capMu.Unlock()
+	if q.capability.CreditGrantEvents == nil {
+		return // no sign-up gift wired: nothing to report on it
+	}
+	var giftLacks []string // the gift's own events the existing subscription does not listen to
+	for _, t := range lacking {
+		for _, g := range q.capability.CreditGrantEvents {
+			if t == g {
+				giftLacks = append(giftLacks, t)
+			}
+		}
+	}
+	switch {
+	case id != "" && len(giftLacks) > 0:
+		q.capability.CreditGrant = false
+		q.capability.CreditGrantSubscription = "OFF — subscription " + id + " does not listen to " +
+			strings.Join(giftLacks, ", ") + "; run `quotactl subscribe-events --config quota-config.json --rotate-secret`"
+		why := make(map[string]string, len(q.capability.WhyOff)+1) // copy: readers hold the old map
+		for k, v := range q.capability.WhyOff {
+			why[k] = v
+		}
+		why["credit_grant"] = q.capability.CreditGrantSubscription
+		q.capability.WhyOff = why
+	case id != "":
+		q.capability.CreditGrantSubscription = "subscribed(" + id + ")"
+	case len(missing) > 0:
+		q.capability.CreditGrantSubscription = "not verified (auto-subscribe skipped: " + strings.Join(missing, ", ") +
+			" not set) — check with `quotactl doctor --money --live`"
+	default:
+		q.capability.CreditGrant = false
+		q.capability.CreditGrantSubscription = "OFF — auto-subscribe neither created nor found a subscription " +
+			"(see its log line); no gift event arrives without one"
+		why := make(map[string]string, len(q.capability.WhyOff)+1) // copy: readers hold the old map
+		for k, v := range q.capability.WhyOff {
+			why[k] = v
+		}
+		why["credit_grant"] = q.capability.CreditGrantSubscription
+		q.capability.WhyOff = why
+	}
 }
 
 // gateBillingChain applies D-56: bill only when the WHOLE chain exists —
@@ -1385,6 +1514,8 @@ func logCapabilities(c Capabilities) {
 		"alerts_webhook", c.AlertsWebhook,
 		"auth_events", c.AuthEvents,
 		"credit_grant", c.CreditGrant,
+		"credit_grant_events", strings.Join(c.CreditGrantEvents, ","), // v0.3.2
+		"credit_grant_subscription", c.CreditGrantSubscription, // v0.3.2
 		"auto_subscribe", c.AutoSubscribe,
 		"ledger", c.LedgerBackend,
 		"float_store", c.FloatStore,

@@ -97,6 +97,9 @@ func TestSetup_MiddlewareEndToEnd(t *testing.T) {
 func TestSetup_WithCreditGranter_RegistersHandler(t *testing.T) {
 	authevents.ClearHandlers()
 	defer authevents.ClearHandlers()
+	// v0.3.2: CreditGrant is "on" only when a gift can arrive — the receiver needs its secret (without
+	// it every event is rejected; that case is pinned in never_astray_20261128_test.go).
+	t.Setenv("AB0T_AUTH_WEBHOOK_SECRET", "s")
 
 	cfg := minimalConfig()
 	// Add a credit_grant to make the handler relevant.

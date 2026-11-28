@@ -28,6 +28,26 @@ import (
 // so tests can shrink it.
 var PriceListRetryBackoff = []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 300 * time.Second}
 
+// v0.3.2 — a 403 to the price-list publish means billing has not (yet) bound this service name to the
+// calling account. It is retried every PriceList403RetryInterval, at most PriceList403MaxRetries times
+// (one week), with these capability strings (shared with the Python library:
+// testdata/money_safety_golden_20261128.json "price_list_403"). PriceList403RetryInterval is a
+// variable so tests can shrink it.
+var PriceList403RetryInterval = 6 * time.Hour
+
+// PriceList403MaxRetries caps the rare 403 retries; after the last one the publisher stops until restart.
+const PriceList403MaxRetries = 28
+
+const priceListNotBound = "billing has not bound this service name to your account yet — not a key problem; " +
+	"run authsetup status and send its price-list request to ab0t support"
+
+// PriceList403RetryingState / PriceList403GaveUpState are Capabilities().PriceList after a 403.
+const (
+	PriceList403RetryingState = "refused(403: " + priceListNotBound + "; retrying every 6h)"
+	PriceList403GaveUpState   = "refused(403: " + priceListNotBound + "; gave up after 28 retries — restart " +
+		"the service to try again)"
+)
+
 // priceListPutter is the one call the publisher needs (*billing.Client implements it).
 type priceListPutter interface {
 	PublishPriceList(ctx context.Context, serviceName string, body []byte) error
@@ -116,10 +136,31 @@ type priceListReport func(state string, attempts, failures int)
 // ctx is done. Returns the final outcome ("" when ctx ended first).
 func runPriceListPublisher(ctx context.Context, putter priceListPutter, service string, body []byte,
 	version string, report priceListReport, sleep func(context.Context, time.Duration) bool) string {
-	attempts, failures := 0, 0
+	attempts, failures, refused403 := 0, 0, 0
 	for {
 		attempts++
 		outcome, status := billing.PriceListOutcome(putter.PublishPriceList(ctx, service, body))
+		if outcome == billing.PriceListRefused && status == 403 {
+			// v0.3.2: not a key problem — billing has not bound this service name to this account,
+			// which is fixed on billing's side (or by re-running setup) without a restart here. Retry
+			// rarely, capped, and say what it means. Same strings as the Python library.
+			failures++
+			if refused403 >= PriceList403MaxRetries {
+				report(PriceList403GaveUpState, attempts, failures)
+				slog.Error("price list REFUSED by billing (403) — "+priceListNotBound+"; gave up (restart the "+
+					"service to try again)", "service", service, "retries", refused403)
+				return outcome
+			}
+			refused403++
+			report(PriceList403RetryingState, attempts, failures)
+			slog.Error("price list REFUSED by billing (403) — "+priceListNotBound+"; billing cannot check usage "+
+				"rates for this service until it lands", "service", service, "retry", refused403,
+				"of", PriceList403MaxRetries, "next_retry", PriceList403RetryInterval)
+			if !sleep(ctx, PriceList403RetryInterval) {
+				return ""
+			}
+			continue
+		}
 		switch outcome {
 		case billing.PriceListPublished:
 			state := "published(" + version + ")"

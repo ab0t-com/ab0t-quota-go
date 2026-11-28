@@ -27,8 +27,9 @@ operators can turn enforcement on safely.
 
 ### Webhook path (the warm path)
 
-Auth events (`org.created`, `user.org_assigned`, plus consumer-defined
-types) arrive at `<your-prefix>/api/quotas/_webhooks/auth`. The receiver
+Auth events (the types auth delivers: `auth.user.registered`,
+`org.member.added`, `org.member.removed`, `auth.user.login`,
+`auth.agent.suspended`) arrive at `<your-prefix>/api/quotas/_webhooks/auth`. The receiver
 verifies HMAC over the **raw body** (never re-canonicalize JSON), parses
 the v1 or v2 envelope, looks up handlers in the package-level Registry,
 and dispatches. Handlers wrapped in `authevents.Idempotent(...)` get

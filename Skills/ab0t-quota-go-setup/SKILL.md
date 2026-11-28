@@ -11,7 +11,7 @@ field on the returned `*quota.Quota`.
 ## Install
 
 ```bash
-go get github.com/ab0t-com/ab0t-quota-go@v0.3.1
+go get github.com/ab0t-com/ab0t-quota-go@v0.3.2
 ```
 
 Public Go module — no `GOPRIVATE` needed. The git tag IS the release.
@@ -104,8 +104,9 @@ Even with no `CreditGranter`, Setup registers:
 - The engine accessible via `q.Check`, `q.Spend`, `q.Release`
 
 With `CreditGranter`, additionally:
-- A handler on `org.created` and `user.org_assigned` events that calls
-  your granter when the event resolves to a tiered user.
+- A handler on `auth.user.registered` (plus `org.member.added` when
+  `grant_on_member_joined` is on; v0.3.2+) that calls your granter when the
+  event resolves to a tiered user.
 
 ## After Setup — verify before moving on
 

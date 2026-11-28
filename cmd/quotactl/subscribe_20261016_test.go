@@ -237,7 +237,10 @@ func TestSubscribeEvents_FindsExistingOnLaterPage_20261016(t *testing.T) {
 		EventTypes: []string{"org.created", "user.org_assigned"}, Secret: "s1", IsActive: true})
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	out, err := runSubscribe(t, srv, "good", "s1")
+	// v0.3.2: the default --events changed (auth.user.registered); this test pins pagination, so it
+	// names the existing subscription's events explicitly. The new default's behaviour against a
+	// subscription on the old names is pinned in never_astray_20261128_test.go.
+	out, err := runSubscribe(t, srv, "good", "s1", "--events", "org.created,user.org_assigned")
 	if err != nil || !strings.Contains(out, "subscription_id: sub_mine") {
 		t.Fatalf("err=%v out=%s", err, out)
 	}

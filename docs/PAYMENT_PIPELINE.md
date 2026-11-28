@@ -10,15 +10,25 @@ Understanding the full path is essential for debugging.
 
 ```
 User's card    → Stripe        : the payment happens here
-Stripe         → payment-svc   : webhooks fire (invoice.paid, etc.)
-payment-svc    → billing-svc   : credit grant lands in the user's balance
-billing-svc    → auth event    : tier change broadcasts via auth's event bus
-auth event     → your service  : ab0t-quota-go receives, your CreditGranter runs
+Stripe         → payment-svc   : webhooks fire (invoice.paid, subscription changes, etc.)
+payment-svc    → billing-svc   : the org's tier is set in billing; money lands in the balance
+auth           → your service  : sign-up / membership events (auth.user.registered, org.member.added)
+                                 reach ab0t-quota-go; your CreditGranter runs for sign-up gifts
+your service   → billing-svc   : the tier is read back (only if you wire a lookup; see below)
 ```
 
 Each hop is independent. Each hop is retried. Each hop is idempotent.
 That's the design — three layers of defense against the same dollar
 landing twice or not at all.
+
+**What this Go runtime does today (read first).** Paid Stripe events are
+handled by payment, not by this library: there is no Stripe webhook proxy
+here, so a tier's `subscription_invoice_paid` plan credit and its
+`reset_on_downgrade` are not executed by the Go runtime. With payment's
+default settings a paid subscription invoice is credited to the org's
+cash balance for the amount paid. The `mesh` tier provider is not wired
+by `Setup` (see the README's known gaps). Payment does not publish
+invoice or tier events through auth.
 
 ---
 
@@ -43,7 +53,9 @@ inside that service. The other services are managed by ab0t.
 
 Trigger: `auth.user.registered` event fires from ab0t-auth.
 
-What ab0t-quota-go does:
+What ab0t-quota-go does (v0.3.2+: `Setup` registers the default handler on
+`auth.user.registered`; before v0.3.2 it listened on `org.created` /
+`user.org_assigned`, which auth does not deliver, so no gift arrived):
 1. Receives the webhook at `/api/quotas/_webhooks/auth`
 2. Verifies HMAC
 3. Looks up handlers for `auth.user.registered`
@@ -70,12 +82,12 @@ Trigger: user clicks "Upgrade" in your UI.
 5. Stripe redirects back to your `success_url`
 6. **Asynchronously**, Stripe fires `customer.subscription.created` to
    payment-service
-7. payment-service records the subscription, propagates the tier
-   change through auth's event bus
-8. ab0t-quota-go's tier provider sees the new tier on the next request
-
-The user's tier is "Pro" within seconds. No credit grant fires *yet*
-— that happens on `invoice.paid` (Moment 3).
+7. payment-service records the subscription, maps the Stripe price to a
+   tier (a map on payment's side; ask ab0t support to add your price
+   ids) and sets the org's tier in billing (`PUT /billing/{org_id}/tier`)
+8. ab0t-quota-go sees the new tier only if its tier provider reads
+   billing: wire your own lookup (README, known gaps). ab0t auth tokens
+   carry no tier claim, so `jwt` does not see it.
 
 ### Moment 3 — Stripe charges the card and fires `invoice.paid`
 
@@ -84,24 +96,14 @@ on subscription create, then monthly).
 
 1. Stripe fires `invoice.paid` to payment-service
 2. payment-service verifies signature, checks idempotency
-3. payment-service publishes `subscription.invoice.paid` to auth's
-   event bus (with `org_id`, `tier_id`, `amount`, `invoice_id` in the
-   payload)
-4. auth fans out to subscribers (including your service)
-5. ab0t-quota-go's webhook receiver gets the event
-6. The default credit-grant handler runs (idempotent on `event_id =
-   invoice_id`)
-7. It resolves the tier's `credit_grant` block
-8. Calls your `CreditGranter.GrantCredit(req)` with the configured
-   `amount_per_period`
-9. Your `CreditGranter` calls
-   `billing.GrantCredit(req)` and billing-service updates the
-   `subscription_credit` bucket
+3. With payment's default settings it credits the org's cash
+   `balance` with the amount paid (idempotent on the invoice id)
 
-If the subscription's tier has `lifecycle: use_it_or_lose_it`,
-billing-service resets the bucket to the new amount (forfeiting any
-previous-period leftover). If `rollover_capped` or `rollover_unlimited`,
-billing-service adds with the cap rules.
+Nothing reaches ab0t-quota-go here: payment publishes no invoice event
+through auth, and this library has no Stripe proxy, so your
+`CreditGranter` is not called and the tier's `credit_grant` (plan
+credit into `subscription_credit`) is not applied by the Go runtime.
+Ask ab0t support how plan credit runs in your environment.
 
 ### Moment 4 — User makes an API call (the spend moment)
 
@@ -152,7 +154,7 @@ Trigger: a `q.Spend` would cross the tier's limit.
      "upgrade_url": "https://billing.your-domain.com/upgrade"
    }
    ```
-4. Headers include `Retry-After`, `X-Quota-*`
+4. Headers include `X-Quota-*` (no `Retry-After` is sent on a `429` today, as the README says; clients back off on their own)
 
 Your frontend reads `upgrade_url` from the body, surfaces an upgrade
 prompt to the user.
@@ -163,14 +165,11 @@ Trigger: user clicks "Cancel subscription" in customer portal.
 
 1. Stripe customer portal updates the subscription
 2. Stripe fires `customer.subscription.updated` to payment-service
-3. payment-service propagates the new tier through auth
-4. **If `reset_on_downgrade: true`** (the default), billing-service
-   resets the `subscription_credit` bucket to 0
-5. The user's new tier is in effect on the next request
-
-Race: if the user has unspent `subscription_credit` at downgrade time,
-it's forfeit by default. Set `reset_on_downgrade: false` to keep it
-(rare; usually a generosity signal).
+3. payment-service sets the new tier in billing (a cancellation lands on `free`)
+4. `reset_on_downgrade` is not acted on by the Go runtime today: any
+   `subscription_credit` the org holds stays unless something else
+   resets it
+5. The user's new tier is in effect once your tier provider reads it
 
 ### Moment 7 — User tops up (Archetype B / D)
 

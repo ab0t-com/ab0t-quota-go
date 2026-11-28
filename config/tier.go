@@ -58,7 +58,90 @@ const (
 	BillingModelOneTimePurchase         BillingModel = "one_time_purchase"
 	BillingModelFreeTier                BillingModel = "free_tier"
 	BillingModelEnterprise              BillingModel = "enterprise"
+
+	// v0.3.2 — one billing_model name set for both libraries (testdata/billing_models_golden_20261128.json).
+	// The Python library's names: capacity_only is what an absent billing_model (and free_tier /
+	// enterprise, which have no rule of their own here) always meant — limits only; the three
+	// experimental ones have no runtime in either library.
+	BillingModelCapacityOnly            BillingModel = "capacity_only"
+	BillingModelMetered                 BillingModel = "metered"
+	BillingModelSeatBased               BillingModel = "seat_based"
+	BillingModelSubscriptionWithOverage BillingModel = "subscription_with_overage"
 )
+
+// BillingModelAliases (v0.3.2) maps a name to the canonical name with the SAME meaning in both
+// libraries. Both libraries accept an alias and print BillingModelAliasWarning; nothing is ever
+// silently treated as a different model.
+var BillingModelAliases = map[BillingModel]BillingModel{
+	BillingModelFreeTier:       BillingModelCapacityOnly,
+	BillingModelEnterprise:     BillingModelCapacityOnly,
+	BillingModelMeteredBilling: BillingModelMetered,
+}
+
+// billingModelShortMeaning is the shared one-line meaning of each canonical name.
+var billingModelShortMeaning = map[BillingModel]string{
+	BillingModelCapacityOnly:            "limits only: the tier itself moves no money",
+	BillingModelConsumptionOnly:         "pay as you go from a prepaid balance",
+	BillingModelSubscriptionWithCredits: "a recurring price that includes credit",
+	BillingModelSubscriptionUnlockOnly:  "a recurring price that unlocks limits, no included credit",
+	BillingModelMetered:                 "experimental: no runtime in either library yet",
+	BillingModelSeatBased:               "experimental: no runtime in either library yet",
+	BillingModelSubscriptionWithOverage: "experimental: no runtime in either library yet",
+	BillingModelOneTimePurchase:         "experimental: no runtime in either library yet",
+}
+
+// Canonical (v0.3.2) returns the canonical name for m: the alias target, else m itself ("" stays "",
+// which means capacity_only).
+func (m BillingModel) Canonical() BillingModel {
+	if c, ok := BillingModelAliases[m]; ok {
+		return c
+	}
+	return m
+}
+
+// IsKnown (v0.3.2) reports whether m is a canonical name, an alias, or absent.
+func (m BillingModel) IsKnown() bool {
+	if m == "" {
+		return true
+	}
+	_, ok := billingModelShortMeaning[m.Canonical()]
+	return ok
+}
+
+// pythonOnlyExperimental (v0.3.2) — experimental names this library used to accept as "unknown"
+// (a warning, booting as limits only). The Python library refuses them without the opt-in; this
+// library warns (BillingModelGoGraceWarning) until its next minor release, because refusing a config
+// that started yesterday is a breaking change.
+func (m BillingModel) pythonOnlyExperimental() bool {
+	switch m {
+	case BillingModelMetered, BillingModelSeatBased, BillingModelSubscriptionWithOverage:
+		return true
+	}
+	return false
+}
+
+// BillingModelAliasWarning is the text both libraries print for a tier whose billing_model is an alias.
+func BillingModelAliasWarning(tierID string, name BillingModel) string {
+	c := name.Canonical()
+	return `tier "` + tierID + `": billing_model "` + string(name) + `" is another name for "` + string(c) +
+		`" (` + billingModelShortMeaning[c] + `); both libraries accept it — write "` + string(c) +
+		`" to silence this warning`
+}
+
+// BillingModelGoGraceWarning is the text for a Python-only experimental name without the opt-in.
+func BillingModelGoGraceWarning(tierID string, name BillingModel) string {
+	return `tier "` + tierID + `": billing_model "` + string(name) + `" is experimental and has no runtime in ` +
+		`either library yet; the Python library refuses it unless AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS=true, ` +
+		`and this library will too from its next minor release — until then this tier runs as limits only`
+}
+
+// ScheduledGrantNeverFiresWarning (v0.3.2) is the text both libraries print for a credit_grant whose
+// trigger no runtime fires.
+func ScheduledGrantNeverFiresWarning(tierID string) string {
+	return `tier "` + tierID + `": credit_grant.trigger "scheduled_period_start" is accepted but neither library ` +
+		`fires it yet — this grant is never given (no periodic refill happens); use "signup", or grant the ` +
+		`credit yourself through billing`
+}
 
 // IsExperimental reports whether the model needs the experimental gate.
 func (m BillingModel) IsExperimental() bool {

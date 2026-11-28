@@ -150,7 +150,7 @@ func TestWebhook_GrantsOnSignup(t *testing.T) {
     defer q.Close(context.Background())
 
     body := []byte(`{
-        "event_type":"org.created",
+        "event_type":"auth.user.registered",
         "event_id":"evt-test-1",
         "data":{"user_id":"alice","org_id":"acme"}
     }`)
@@ -224,11 +224,11 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   -X POST $SVC/api/quotas/_webhooks/auth \
   -H 'X-Event-Signature: sha256=deadbeef' \
   -H 'Content-Type: application/json' \
-  -d '{"event_type":"org.created","event_id":"e1"}'
+  -d '{"event_type":"auth.user.registered","event_id":"e1"}'
 # expect: 401
 
 # 4. Webhook with good sig → 200
-BODY='{"event_type":"org.created","event_id":"e-test-'$RANDOM'","data":{"user_id":"alice","org_id":"acme"}}'
+BODY='{"event_type":"auth.user.registered","event_id":"e-test-'$RANDOM'","data":{"user_id":"alice","org_id":"acme"}}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
 curl -s -X POST $SVC/api/quotas/_webhooks/auth \
   -H "X-Event-Signature: sha256=$SIG" \
@@ -375,8 +375,9 @@ quotactl subscribe-events --rotate-secret
 ### "Webhooks return 200 + `status: ignored`"
 
 → No handler registered for that event_type. Either:
-- Pass `CreditGranter` to Setup (registers default handler for
-  `org.created` + `user.org_assigned`)
+- Pass `CreditGranter` to Setup (v0.3.2+ registers the default handler on
+  `auth.user.registered`, plus `org.member.added` when `grant_on_member_joined`;
+  before v0.3.2 on `org.created` + `user.org_assigned`, which auth never delivers)
 - Register your own with `authevents.OnAuthEvent("type", handler)`
 
 ### "Same event grants credit twice"

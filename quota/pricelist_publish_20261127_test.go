@@ -110,7 +110,9 @@ func TestPriceListPublisher_404AndRefusalsAreNotRetried_20261127(t *testing.T) {
 		status int
 		out    string
 		state  string
-	}{{404, "unsupported", "unsupported("}, {403, "refused", "refused(403)"}, {422, "refused", "refused(422)"}} {
+	}{{404, "unsupported", "unsupported("}, {401, "refused", "refused(401)"}, {422, "refused", "refused(422)"}} {
+		// v0.3.2: a 403 is no longer "never retried" — it is retried rarely (every 6 h, capped) with a
+		// state that says what it means (never_astray_20261128_test.go). 401 keeps the old rule here.
 		p, rec, sl := &fakePutter{answers: []int{tc.status, 200}}, &recorded{}, &sleeps{}
 		if out := runPriceListPublisher(context.Background(), p, "s", []byte(`{}`), "v", rec.report, sl.sleep); out != tc.out {
 			t.Errorf("%d → %q want %q", tc.status, out, tc.out)

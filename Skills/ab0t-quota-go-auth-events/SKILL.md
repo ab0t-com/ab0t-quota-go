@@ -1,6 +1,6 @@
 ---
 name: ab0t-quota-go-auth-events
-description: Receive and handle ab0t auth-service webhook events in Go via the ab0t-quota-go library. Use when mounting the webhook receiver, registering handlers with `authevents.OnAuthEvent`, wrapping handlers with `authevents.Idempotent` for delivery dedup + retry + ledger persistence, implementing a CreditGranter, composing business dedup keys, auto-subscribing on startup, debugging 401/HMAC failures, or handling org.created / user.org_assigned / payment.succeeded events.
+description: Receive and handle ab0t auth-service webhook events in Go via the ab0t-quota-go library. Use when mounting the webhook receiver, registering handlers with `authevents.OnAuthEvent`, wrapping handlers with `authevents.Idempotent` for delivery dedup + retry + ledger persistence, implementing a CreditGranter, composing business dedup keys, auto-subscribing on startup, debugging 401/HMAC failures, or handling auth.user.registered / org.member.added events (auth never delivers org.created / user.org_assigned to a webhook).
 ---
 
 # ab0t-quota-go Auth Events
@@ -28,9 +28,9 @@ dispatches to registered handlers.
 ## Register a plain handler
 
 ```go
-authevents.OnAuthEvent("org.created", authevents.HandlerFunc(
+authevents.OnAuthEvent("auth.user.login", authevents.HandlerFunc(
     func(ctx context.Context, ev authevents.Event) error {
-        log.Println("org created:", ev.GetOrgID())
+        log.Println("user logged in, org:", ev.GetOrgID())
         return nil
     },
 ))
@@ -97,8 +97,10 @@ with `{amount, reason, idempotency_key}` yourself.
 Only a tier whose `credit_grant.trigger` is `"signup"` is granted here
 (v0.1.10; v0.1.9 granted any trigger).
 
-Setup registers the default handler on `org.created` AND
-`user.org_assigned`. It resolves the user's tier (via your
+Since v0.3.2, Setup registers the default handler on `auth.user.registered`
+(plus `org.member.added` when `auth_events.grant_on_member_joined` is on).
+Before v0.3.2 it listened on `org.created` / `user.org_assigned`, which auth
+never delivers, so no gift arrived. It resolves the user's tier (via your
 TierProvider), composes the business dedup key (per the tier's `dedup`
 policy), and calls the granter once per (user, tier) pair — and billing
 dedups the idempotency key durably, so even a redelivery after the library

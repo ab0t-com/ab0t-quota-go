@@ -219,9 +219,9 @@ no one user can pin 8 of them."
 
 ### PinStore — the user→org stable map
 
-When `auth.user.registered` fires, the user has no org yet. When
-`org.created` fires, the org has no users yet. The default
-credit-grant handler needs both. The **PinStore** records "the first
+When `auth.user.registered` fires, the user may have no org yet; when
+`org.member.added` fires, the same user may be joining another org. The default
+credit-grant handler needs a stable org for each user. The **PinStore** records "the first
 billing org observed for this user" and keeps it stable forever —
 operator overrides win, auto-mappings stick. This avoids the bug where
 a user signs up, gets credit, joins a different org, and gets credit

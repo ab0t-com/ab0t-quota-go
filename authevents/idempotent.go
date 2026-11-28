@@ -44,7 +44,7 @@ func (h *IdempotentHandler) Handle(ctx context.Context, event Event) error {
 //	    // your work
 //	    return nil
 //	})
-//	authevents.OnAuthEvent("org.created", h)
+//	authevents.OnAuthEvent("auth.user.registered", h) // a type auth delivers (DeliveredEventTypes)
 func Idempotent(cfg handlerledger.IdempotentConfig, inner handlerledger.InnerHandler) *IdempotentHandler {
 	return &IdempotentHandler{inner: handlerledger.Idempotent(cfg, inner)}
 }

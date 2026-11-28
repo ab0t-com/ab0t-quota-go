@@ -64,13 +64,16 @@ first, so use-it-or-lose-it works).
 library has a `credit_grant` config block per tier that says **when**
 to grant (signup, subscription_invoice_paid, manual), **how much**
 (amount_per_period), and **what happens to leftovers** (lifecycle).
+In this Go runtime only `signup` grants are carried out (on auth
+events); `subscription_invoice_paid` is not executed here (no Stripe
+proxy) and `scheduled_period_start` never fires.
 
 **Lifecycle** of a credit grant — what happens to unused credit at
 each new grant:
 - `persistent` — never expires (signup gift you keep forever)
 - `use_it_or_lose_it` — resets to zero on next grant (typical monthly subscription)
 - `rollover_capped` — leftover banks, but capped at N periods (enterprise-friendly)
-- `rollover_unlimited` — leftover banks forever (rare)
+- `rollover_unlimited` — leftover banks forever (rare; Python library only — Go warns and billing refuses it)
 
 **Top-up** — user explicitly buys credit (Stripe Checkout
 `account_funding`). Distinct from a subscription charge.

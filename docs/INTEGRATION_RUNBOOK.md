@@ -69,6 +69,17 @@ silent in-memory fallback. `${QUOTA_REDIS_URL}` declares it from your
 deploy env (Stage 6); the key prefix is fixed at `"quota"` (cross-runtime
 keyspace parity) and is omitted here because no other value boots.
 
+**About `tier_provider` below:** `Setup` does not wire the `mesh`
+provider's billing lookup yet. As written, every org resolves to
+`default_tier` (`free`), so a paying customer gets free limits. Until a
+release wires it, either install your own lookup after `Setup` (leave
+`cache_ttl_seconds` out so the provider is not wrapped, then
+`q.Provider.(*providers.MeshProvider).SetLookup(fn)`, where `fn` calls
+`GET /billing/{org_id}/tier` with your billing key and caches the
+answer), or use `jwt` only if your own auth layer puts a tier claim in
+the token (ab0t auth tokens carry none; Go's default claim name is
+`tier`, Python's `org_tier`).
+
 ```json
 {
   "service_name": "gateway",
@@ -212,8 +223,10 @@ func main() {
 }
 ```
 
-The library reads `AB0T_QUOTA_BILLING_URL`, `AB0T_QUOTA_PAYMENT_URL`,
-and a few other env vars at Setup. They're listed in
+The library reads `BILLING_SERVICE_URL` / `BILLING_SERVICE_API_KEY` and
+`PAYMENT_SERVICE_URL` / `PAYMENT_SERVICE_API_KEY` (the names
+`authsetup connect billing|payment` prints; the older `AB0T_QUOTA_*`
+names still work with a deprecation warning) and a few other env vars at Setup. They're listed in
 [ab0t-quota-go-setup](../Skills/ab0t-quota-go-setup/SKILL.md).
 
 Start your service. The startup log should print one line listing
@@ -365,20 +378,26 @@ Then update Setup:
 
 ```go
 q, err := quota.Setup(ctx, quota.Options{
-    ConfigPath:              "quota-config.json",
-    CreditGranter:           gatewayGranter{bc: q.Billing},
-    AutoSubscribeAuthEvents: true,
+    ConfigPath:    "quota-config.json",
+    CreditGranter: quota.BillingCreditGranter(nil), // or your own granter
 })
+if err != nil { log.Fatal(err) }
+// v0.3.2+: Setup registers the default sign-up gift handler on auth.user.registered
+// (plus org.member.added when grant_on_member_joined is on). Nothing more to register.
 ```
 
 `q.Billing` is the typed client to ab0t-billing-service. It's nil if
-`AB0T_QUOTA_BILLING_URL` isn't set — fix that in Stage 6 first.
+`BILLING_SERVICE_URL` isn't set (and `BillingCreditGranter(nil)` then
+refuses to start) — fix that in Stage 6 first.
 
-`AutoSubscribeAuthEvents` makes the library call auth at startup to
-register your webhook URL. Idempotent; safe to run on every deploy.
+Register the webhook with auth once: `quotactl subscribe-events` (v0.3.2+
+defaults to the gift's events: `auth.user.registered`, plus
+`org.member.added` when `"auth_events": {"grant_on_member_joined": true}`),
+or turn on `AutoSubscribeAuthEvents` (v0.3.2+ subscribes only to types auth
+delivers). Then `quotactl doctor --money` checks the wiring.
 
 **Verify Stage 5:** four tests, in this order:
-1. Post a signed `org.created` webhook → 200, your stub `CreditGranter` called once
+1. Post a signed `auth.user.registered` webhook → 200, your stub `CreditGranter` called once
 2. Replay the EXACT same body → 200, but `CreditGranter` NOT called again (delivery dedup)
 3. Post with a bad HMAC sig → 401 with `invalid signature` body
 4. Post unknown `event_type` → 200 with `"status":"ignored"`
@@ -397,9 +416,10 @@ whatever):
 | Var | Value | Where to get it |
 |-----|-------|-----------------|
 | `QUOTA_REDIS_URL` | your Redis endpoint (single-node, non-evicting) | your infra — the counter store Stage 2 declares; REQUIRED or boot refuses (QUOTA-CFG-001) |
-| `AB0T_QUOTA_BILLING_URL` | `https://billing.service.ab0t.com` | known |
-| `AB0T_QUOTA_PAYMENT_URL` | `https://payment.service.ab0t.com` | known |
-| `AB0T_QUOTA_SERVICE_TOKEN` | bearer token | ab0t-mesh registration |
+| `BILLING_SERVICE_URL` | `https://billing.service.ab0t.com` | known (Go has no built-in default; unset = billing off) |
+| `BILLING_SERVICE_API_KEY` | your billing key | `authsetup connect billing` (`.api_key.key` in the file it saves) |
+| `PAYMENT_SERVICE_URL` | `https://payment.service.ab0t.com` | known |
+| `PAYMENT_SERVICE_API_KEY` | your payment key | `authsetup connect payment` |
 | `AB0T_AUTH_AUTH_URL` | `https://auth.service.ab0t.com` | known |
 | `AB0T_AUTH_ADMIN_TOKEN` | bearer token | ab0t-auth admin |
 | `AB0T_AUTH_WEBHOOK_PUBLIC_URL` | `https://gateway.your-domain.com` | your service's public URL |
@@ -415,8 +435,8 @@ Store it in your secrets store (AWS Secrets Manager, GCP Secret
 Manager, Vault). The same value must be set in:
 
 1. Your gateway service's env
-2. The subscription you create in ab0t-auth (handled by
-   `AutoSubscribeAuthEvents`)
+2. The subscription you create in ab0t-auth (`quotactl subscribe-events`,
+   Stage 5)
 
 If they don't match, the receiver returns 401 to every event.
 
@@ -426,8 +446,9 @@ After this, restart your service and re-check capabilities:
 quotactl capabilities --config quota-config.json
 ```
 
-You should see `Billing: true`, `Payment: true`, `CreditGrant: true`,
-`AutoSubscribe: true`.
+You should see `Billing: true`, `Payment: true`, `CreditGrant: true`.
+(`CreditGrant: true` only says a granter is wired; it does not prove the
+subscribed event is one auth delivers. Prove it with one real sign-up.)
 
 **Verify Stage 6** — bash smoke tests against the live staging URL:
 
@@ -440,10 +461,10 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST \
   $SVC/api/quotas/_webhooks/auth \
   -H 'X-Event-Signature: sha256=deadbeef' \
   -H 'Content-Type: application/json' \
-  -d '{"event_type":"org.created","event_id":"e1"}'
+  -d '{"event_type":"auth.user.registered","event_id":"e1"}'
 
 # Good sig → 200
-BODY='{"event_type":"org.created","event_id":"smoke-'$RANDOM'","data":{"user_id":"alice","org_id":"acme"}}'
+BODY='{"event_type":"auth.user.registered","event_id":"smoke-'$RANDOM'","data":{"user_id":"alice","org_id":"acme"}}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
 curl -s -X POST $SVC/api/quotas/_webhooks/auth \
   -H "X-Event-Signature: sha256=$SIG" \

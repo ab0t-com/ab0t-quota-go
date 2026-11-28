@@ -102,12 +102,17 @@ func (c *Config) Warnings() []string {
 					`it is never enforced (typo?)`, t.TierID, k))
 			}
 		}
-		switch t.BillingModel {
-		case "", BillingModelConsumptionOnly, BillingModelSubscriptionUnlockOnly, BillingModelSubscriptionWithCredits,
-			BillingModelMeteredBilling, BillingModelOneTimePurchase, BillingModelFreeTier, BillingModelEnterprise:
-		default:
+		// v0.3.2 — one name set for both libraries (testdata/billing_models_golden_20261128.json): an
+		// alias is accepted and named; a Python-only experimental name keeps booting (as limits only)
+		// with a warning until the next minor; anything else is unknown, as before.
+		switch {
+		case !t.BillingModel.IsKnown():
 			w = append(w, fmt.Sprintf(`tier %q: unknown billing_model %q — none of its cross-field rules apply`,
 				t.TierID, t.BillingModel))
+		case BillingModelAliases[t.BillingModel] != "":
+			w = append(w, BillingModelAliasWarning(t.TierID, t.BillingModel))
+		case t.BillingModel.pythonOnlyExperimental() && !envBool("AB0T_QUOTA_ALLOW_EXPERIMENTAL_BILLING_MODELS", false):
+			w = append(w, BillingModelGoGraceWarning(t.TierID, t.BillingModel))
 		}
 		g := t.CreditGrant
 		if g == nil {
@@ -117,7 +122,10 @@ func (c *Config) Warnings() []string {
 			w = append(w, ResetOnDowngradeUnsetWarning(t.TierID))
 		}
 		switch g.Trigger {
-		case CreditTriggerSignup, CreditTriggerSubscriptionInvoicePaid, CreditTriggerScheduledPeriodStart,
+		case CreditTriggerScheduledPeriodStart:
+			// v0.3.2: accepted, but neither library fires it — say so (a refusal would be a MINOR).
+			w = append(w, ScheduledGrantNeverFiresWarning(t.TierID))
+		case CreditTriggerSignup, CreditTriggerSubscriptionInvoicePaid,
 			CreditTriggerManual, CreditTriggerWebhookAdmin:
 		case "":
 			w = append(w, fmt.Sprintf(`tier %q: credit_grant has no trigger — the Go runtime treats it as `+
